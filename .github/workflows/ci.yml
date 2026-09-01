@@ -36,31 +36,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
-
-      - name: Cache ~/.npm (additional layer)
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-cache-node${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            npm-cache-node${{ matrix.node-version }}-
-            npm-cache-
-
-      - name: Cache diagnostics
-        run: |
-          echo "Setup-node cache hit: ${{ steps.setup-node.outputs.cache-hit }}"
-          echo "~/.npm cache hit: ${{ steps.npm-cache.outputs.cache-hit }}"
 
       - name: Report tool versions
         run: |
           echo "Node.js version: $(node --version)"
           echo "npm version: $(npm --version)"
 
-      - name: Install dependencies (clean, reproducible)
-        run: npm ci --prefer-offline --no-audit --no-fund
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
 
       - name: Run linter (if configured)
         run: npm run lint --if-present
@@ -95,8 +78,6 @@ jobs:
         if: always()
         run: |
           echo "### Build result for Node.js ${{ matrix.node-version }}: \`${{ job.status }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Setup-node cache hit: ${{ steps.setup-node.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ~/.npm cache hit: ${{ steps.npm-cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
 
   ci-status:
     name: CI Status Summary
