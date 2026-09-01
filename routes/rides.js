@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const admin = require('firebase-admin');
 
-// Criar nova solicitação de corrida
+// 1. Criar nova solicitação de corrida (Passageiro)
 router.post('/request', async (req, res) => {
   try {
     const { userId, origin, destination, price, distance } = req.body;
@@ -20,8 +20,8 @@ router.post('/request', async (req, res) => {
       driverId: null,
       origin,
       destination,
-      price,
-      distance,
+      price: price || 0,
+      distance: distance || 0,
       status: 'SEARCHING', // SEARCHING, ACCEPTED, IN_PROGRESS, COMPLETED, CANCELLED
       createdAt: admin.database.ServerValue.TIMESTAMP
     };
@@ -35,7 +35,7 @@ router.post('/request', async (req, res) => {
   }
 });
 
-// Aceitar corrida (Motorista)
+// 2. Aceitar corrida (Motorista)
 router.post('/accept', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
@@ -60,7 +60,7 @@ router.post('/accept', async (req, res) => {
   }
 });
 
-// Atualizar status da corrida (IN_PROGRESS, COMPLETED, CANCELLED)
+// 3. Atualizar status da corrida (IN_PROGRESS, COMPLETED, CANCELLED)
 router.patch('/status', async (req, res) => {
   try {
     const { rideId, status } = req.body;
@@ -70,12 +70,35 @@ router.patch('/status', async (req, res) => {
     }
 
     const db = admin.database();
-    await db.ref(`rides/${rideId}`).update({ status });
+    await db.ref(`rides/${rideId}`).update({
+      status,
+      updatedAt: admin.database.ServerValue.TIMESTAMP
+    });
 
     return res.json({ success: true, status });
   } catch (error) {
     console.error('Erro ao atualizar status:', error);
     return res.status(500).json({ error: 'Erro ao atualizar status da corrida.' });
+  }
+});
+
+// 4. Obter detalhes de uma corrida específica
+router.get('/:rideId', async (req, res) => {
+  try {
+    const { rideId } = req.params;
+    const db = admin.database();
+
+    const snapshot = await db.ref(`rides/${rideId}`).get();
+    const ride = snapshot.val();
+
+    if (!ride) {
+      return res.status(404).json({ error: 'Corrida não encontrada.' });
+    }
+
+    return res.json({ success: true, ride });
+  } catch (error) {
+    console.error('Erro ao buscar corrida:', error);
+    return res.status(500).json({ error: 'Erro interno ao buscar corrida.' });
   }
 });
 
