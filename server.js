@@ -28,9 +28,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
-const io = socketIo(server, {
-  cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true }
-});
+const io = socketIo(server, { cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true } });
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -52,15 +50,13 @@ app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-aio.use((socket, next) => {
+io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '');
     if (!token) return next(new Error('Não autenticado'));
     socket.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
-  } catch (error) {
-    next(new Error('Token inválido ou expirado'));
-  }
+  } catch (error) { next(new Error('Token inválido ou expirado')); }
 });
 
 io.on('connection', (socket) => {
@@ -75,23 +71,17 @@ io.on('connection', (socket) => {
       const uid = socket.user.uid;
       if (ride.userId !== uid && ride.driverId !== uid) return;
       socket.join(`ride_${rideId}`);
-    } catch (error) {
-      console.error('Erro ao entrar na corrida:', error.message);
-    }
+    } catch (error) { console.error('Erro ao entrar na corrida:', error.message); }
   });
 
-  socket.on('leave-ride-room', (rideId) => {
-    if (rideId) socket.leave(`ride_${rideId}`);
-  });
+  socket.on('leave-ride-room', (rideId) => { if (rideId) socket.leave(`ride_${rideId}`); });
 
   socket.on('join-drivers-room', async () => {
     try {
       const snap = await db.ref(`users/${socket.user.uid}`).once('value');
       const driver = snap.val();
-      if (driver?.userType === 'driver' && driver?.isOnline === true) socket.join('available_drivers');
-    } catch (error) {
-      console.error('Erro ao entrar na sala de motoristas:', error.message);
-    }
+      if (driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true) socket.join('available_drivers');
+    } catch (error) { console.error('Erro ao entrar na sala de motoristas:', error.message); }
   });
 
   socket.on('driver-location', async (data = {}) => {
@@ -99,19 +89,16 @@ io.on('connection', (socket) => {
     const latitude = Number(data.latitude ?? data.lat);
     const longitude = Number(data.longitude ?? data.lng);
     const driverId = socket.user.uid;
-    if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
-
+    if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
     try {
       const snap = await db.ref(`rides/${rideId}`).once('value');
       const ride = snap.val();
-      if (!ride || ride.driverId !== driverId) return;
+      if (!ride || ride.driverId !== driverId || !['ACCEPTED', 'IN_PROGRESS'].includes(ride.status)) return;
       const location = { latitude, longitude, lat: latitude, lng: longitude, timestamp: Date.now() };
       await db.ref(`locations/${driverId}`).set(location);
       await db.ref(`users/${driverId}`).update({ currentLocation: { lat: latitude, lng: longitude }, lastLocationUpdate: new Date().toISOString() });
       io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
-    } catch (error) {
-      console.error('Erro na localização:', error.message);
-    }
+    } catch (error) { console.error('Erro na localização:', error.message); }
   });
 
   socket.on('request-ride', async (data = {}) => {
@@ -121,9 +108,7 @@ io.on('connection', (socket) => {
       const ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
       io.to('available_drivers').emit('new-ride-request', { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance });
-    } catch (error) {
-      console.error('Erro ao divulgar corrida:', error.message);
-    }
+    } catch (error) { console.error('Erro ao divulgar corrida:', error.message); }
   });
 
   socket.on('accept-ride', async (data = {}) => {
@@ -131,29 +116,30 @@ io.on('connection', (socket) => {
     try {
       const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
-      // A aceitação é persistida pela rota HTTP; aqui apenas notificamos a sala.
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
       socket.join(`ride_${data.rideId}`);
       io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid });
-    } catch (error) {
-      console.error('Erro ao notificar aceitação:', error.message);
-    }
+    } catch (error) { console.error('Erro ao notificar aceitação:', error.message); }
   });
 
   socket.on('start-ride', async (data = {}) => {
     if (!data.rideId) return;
-    const snap = await db.ref(`rides/${data.rideId}`).once('value');
-    const ride = snap.val();
-    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
-    io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
+    try {
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
+      io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
+    } catch (error) { console.error('Erro ao iniciar corrida:', error.message); }
   });
 
   socket.on('end-ride', async (data = {}) => {
     if (!data.rideId) return;
-    const snap = await db.ref(`rides/${data.rideId}`).once('value');
-    const ride = snap.val();
-    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
-    io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
+    try {
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
+      io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
+    } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
   });
 
   socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
