@@ -5,12 +5,17 @@ const admin = require('firebase-admin');
 const http = require('http');
 const socketIo = require('socket.io');
 
+// Rotas
+const authRoutes = require('./routes/auth');
+const driverRoutes = require('./routes/drivers');
+const rideRoutes = require('./routes/rides');
+const locationRoutes = require('./routes/location');
+
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
 
-// Configuração do CORS para o frontend em produção e ambiente local
 const allowedOrigins = [
   'https://uber-clone-eric.vercel.app',
   'http://localhost:3000'
@@ -18,27 +23,24 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true); // Altere para callback(new Error('Bloqueado pelo CORS')) se quiser restringir 100%
-    }
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Bloqueado pelo CORS'));
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const io = socketIo(server, {
   cors: {
     origin: allowedOrigins,
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
-// Inicializar Firebase Admin SDK
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -53,99 +55,122 @@ if (!admin.apps.length) {
 const db = admin.database();
 const auth = admin.auth();
 
-// Importar rotas
-const authRoutes = require('./routes/auth');
-const driverRoutes = require('./routes/drivers');
-const rideRoutes = require('./routes/rides');
-const locationRoutes = require('./routes/location');
-
-// Usar rotas
 app.use('/api/auth', authRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 
-// Rota de teste
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'Server is running!', timestamp: new Date() });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// WebSocket para localização e estado das corridas em tempo real
+// Autenticação do Socket.IO usando o mesmo JWT do backend.
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '');
+    if (!token) return next(new Error('Não autenticado'));
+
+    const jwt = require('jsonwebtoken');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.user = decoded;
+    next();
+  } catch (error) {
+    next(new Error('Token inválido ou expirado'));
+  }
+});
+
 io.on('connection', (socket) => {
-  console.log('Novo cliente conectado:', socket.id);
+  console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
 
-  // Entrada em uma sala específica da corrida
-  socket.on('join-ride-room', (rideId) => {
-    socket.join(`ride_${rideId}`);
-    console.log(`Socket ${socket.id} entrou na sala da corrida: ride_${rideId}`);
-  });
-
-  // Saída da sala da corrida
-  socket.on('leave-ride-room', (rideId) => {
-    socket.leave(`ride_${rideId}`);
-    console.log(`Socket ${socket.id} saiu da sala: ride_${rideId}`);
-  });
-
-  // Entrada dos motoristas na sala geral de ofertas
-  socket.on('join-drivers-room', () => {
-    socket.join('available_drivers');
-    console.log(`Motorista ${socket.id} entrou na sala de motoristas disponíveis.`);
-  });
-
-  // Atualização de localização do motorista (enviada para a sala da corrida ativa)
-  socket.on('driver-location', (data) => {
-    const { rideId, latitude, longitude, driverId } = data;
-    if (rideId) {
-      io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, latitude, longitude });
-    } else {
-      socket.broadcast.emit('update-driver-location', data);
-    }
-  });
-
-  // Usuário solicita uma nova corrida (notifica a sala de motoristas)
-  socket.on('request-ride', (data) => {
-    console.log('Corrida solicitada:', data);
-    io.to('available_drivers').emit('new-ride-request', data);
-  });
-
-  // Motorista aceita a corrida
-  socket.on('accept-ride', (data) => {
-    console.log('Corrida aceita:', data);
-    const { rideId } = data;
-    if (rideId) {
+  socket.on('join-ride-room', async (rideId) => {
+    if (!rideId) return;
+    try {
+      const snap = await db.ref(`rides/${rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride) return;
+      const uid = socket.user.uid;
+      if (ride.passengerId !== uid && ride.driverId !== uid) return;
       socket.join(`ride_${rideId}`);
-      io.to(`ride_${rideId}`).emit('ride-accepted', data);
+    } catch (error) {
+      console.error('Erro ao entrar na corrida:', error.message);
     }
   });
 
-  // Início da corrida
-  socket.on('start-ride', (data) => {
-    console.log('Corrida iniciada:', data);
-    const { rideId } = data;
-    if (rideId) {
-      io.to(`ride_${rideId}`).emit('ride-started', data);
+  socket.on('leave-ride-room', (rideId) => {
+    if (rideId) socket.leave(`ride_${rideId}`);
+  });
+
+  socket.on('join-drivers-room', async () => {
+    try {
+      const snap = await db.ref(`drivers/${socket.user.uid}`).once('value');
+      const driver = snap.val();
+      if (driver?.status === 'available') socket.join('available_drivers');
+    } catch (error) {
+      console.error('Erro ao entrar na sala de motoristas:', error.message);
     }
   });
 
-  // Finalização da corrida
-  socket.on('end-ride', (data) => {
-    console.log('Corrida finalizada:', data);
-    const { rideId } = data;
-    if (rideId) {
-      io.to(`ride_${rideId}`).emit('ride-ended', data);
+  socket.on('driver-location', async (data = {}) => {
+    const { rideId, latitude, longitude } = data;
+    const driverId = socket.user.uid;
+    if (!rideId || !Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) return;
+
+    try {
+      const snap = await db.ref(`rides/${rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride || ride.driverId !== driverId) return;
+
+      const location = { latitude: Number(latitude), longitude: Number(longitude), timestamp: Date.now() };
+      await db.ref(`locations/${driverId}`).set(location);
+      io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
+    } catch (error) {
+      console.error('Erro na localização:', error.message);
     }
+  });
+
+  socket.on('request-ride', async (data = {}) => {
+    if (data.passengerId && data.passengerId !== socket.user.uid) return;
+    if (data.rideId) io.to('available_drivers').emit('new-ride-request', { ...data, passengerId: socket.user.uid });
+  });
+
+  socket.on('accept-ride', async (data = {}) => {
+    if (!data.rideId) return;
+    try {
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'SEARCHING') return;
+      socket.join(`ride_${data.rideId}`);
+      io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid });
+    } catch (error) {
+      console.error('Erro ao aceitar corrida:', error.message);
+    }
+  });
+
+  socket.on('start-ride', async (data = {}) => {
+    if (!data.rideId) return;
+    const snap = await db.ref(`rides/${data.rideId}`).once('value');
+    const ride = snap.val();
+    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
+    io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
+  });
+
+  socket.on('end-ride', async (data = {}) => {
+    if (!data.rideId) return;
+    const snap = await db.ref(`rides/${data.rideId}`).once('value');
+    const ride = snap.val();
+    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
+    io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
   });
 
   socket.on('disconnect', () => {
-    console.log('Cliente desconectado:', socket.id);
+    console.log('Cliente Socket.IO desconectado:', socket.id);
   });
 });
 
 const PORT = process.env.PORT || 5000;
-
 server.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`🔌 WebSocket ativo em ws://localhost:${PORT}`);
+  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`Socket.IO ativo na porta ${PORT}`);
 });
 
 module.exports = { app, io, db, auth };
