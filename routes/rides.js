@@ -130,6 +130,28 @@ async function updateRideStatus(req, res) {
 router.patch('/:rideId/status', updateRideStatus);
 router.patch('/status', updateRideStatus);
 
+router.get('/history', async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const requestedLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 100) : 30;
+    const userSnapshot = await db.ref(`users/${uid}`).get();
+    const user = userSnapshot.val();
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+    const field = user.userType === 'driver' ? 'driverId' : 'userId';
+    const snapshot = await db.ref('rides').orderByChild(field).equalTo(uid).get();
+    const rides = [];
+    snapshot.forEach(child => rides.push(child.val()));
+    rides.sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+
+    return res.json({ success: true, rides: rides.slice(0, limit) });
+  } catch (error) {
+    console.error('Erro ao buscar histórico:', error);
+    return res.status(500).json({ error: 'Erro interno ao buscar histórico de corridas.' });
+  }
+});
+
 router.get('/:rideId', async (req, res) => {
   try {
     const snapshot = await db.ref(`rides/${req.params.rideId}`).get();
