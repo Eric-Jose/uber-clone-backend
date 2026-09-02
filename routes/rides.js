@@ -53,6 +53,19 @@ router.post('/accept', async (req, res) => {
     if (driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Motorista ainda não foi aprovado.' });
     if (!driver.isOnline) return res.status(409).json({ error: 'Motorista está offline.' });
 
+    const activeRidesSnapshot = await db.ref('rides').orderByChild('driverId').equalTo(driverId).get();
+    let activeDriverRide = null;
+    activeRidesSnapshot.forEach(child => {
+      const ride = child.val();
+      if (ACTIVE_STATUSES.includes(ride.status)) activeDriverRide = ride;
+    });
+    if (activeDriverRide) {
+      return res.status(409).json({
+        error: 'Você já possui uma corrida em andamento. Finalize ou cancele a corrida atual antes de aceitar outra.',
+        ride: activeDriverRide
+      });
+    }
+
     const rideRef = db.ref(`rides/${rideId}`);
     const result = await rideRef.transaction((ride) => {
       if (!ride || ride.status !== 'SEARCHING' || ride.driverId) return;
