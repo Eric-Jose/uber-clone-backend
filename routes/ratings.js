@@ -24,14 +24,19 @@ router.post('/', async (req, res) => {
     if (ride.userId !== uid && ride.driverId !== uid) return res.status(403).json({ error: 'Você não pertence a esta corrida.' });
     if (!ride.driverId) return res.status(409).json({ error: 'Esta corrida não possui motorista para avaliação.' });
 
-    const ratingsSnapshot = await db.ref('ratings').orderByChild('rideId').equalTo(rideId).get();
-    let alreadyRated = false;
-    ratingsSnapshot.forEach(child => {
-      if (child.val()?.raterId === uid) alreadyRated = true;
-    });
-    if (alreadyRated) return res.status(409).json({ error: 'Você já avaliou esta corrida.' });
-
     const targetId = ride.userId === uid ? ride.driverId : ride.userId;
+    const markerRef = db.ref(`ratingClaims/${rideId}/${uid}`);
+    const claim = await markerRef.transaction(current => current || { rating: score, claimedAt: admin.database.ServerValue.TIMESTAMP });
+    if (!claim.committed) return res.status(409).json({ error: 'Não foi possível registrar a avaliação.' });
+    if (claim.snapshot.val()?.rating !== score) return res.status(409).json({ error: 'Você já avaliou esta corrida.' });
+
+    const ratingsSnapshot = await db.ref('ratings').orderByChild('rideId').equalTo(rideId).get();
+    let existingRating = null;
+    ratingsSnapshot.forEach(child => {
+      if (child.val()?.raterId === uid) existingRating = child.val();
+    });
+    if (existingRating) return res.status(409).json({ error: 'Você já avaliou esta corrida.' });
+
     const ratingRef = db.ref('ratings').push();
     const ratingData = {
       id: ratingRef.key,
@@ -44,7 +49,19 @@ router.post('/', async (req, res) => {
     };
 
     await ratingRef.set(ratingData);
-    return res.status(201).json({ success: true, rating: ratingData });
+
+    const targetRef = db.ref(`users/${targetId}`);
+    await targetRef.child('ratingCount').transaction(current => (Number(current) || 0) + 1);
+    await targetRef.child('ratingSum').transaction(current => (Number(current) || 0) + score);
+    const aggregate = await targetRef.get();
+    const profile = aggregate.val() || {};
+    const count = Number(profile.ratingCount) || 0;
+    const sum = Number(profile.ratingSum) || 0;
+    if (count > 0) {
+      await targetRef.child('ratingAverage').set(Number((sum / count).toFixed(2)));
+    }
+
+    return res.status(201).json({ success: true, rating: ratingData, aggregate: { ratingCount: count, ratingAverage: count ? Number((sum / count).toFixed(2)) : 0 } });
   } catch (error) {
     console.error('Erro ao registrar avaliação:', error);
     return res.status(500).json({ error: 'Erro interno ao registrar avaliação.' });
@@ -65,6 +82,19 @@ router.get('/ride/:rideId', async (req, res) => {
   } catch (error) {
     console.error('Erro ao buscar avaliações:', error);
     return res.status(500).json({ error: 'Erro interno ao buscar avaliações.' });
+  }
+});
+
+router.get('/me', async (req, res) => {
+  try {
+    const snapshot = await db.ref(`users/${req.user.uid}`).get();
+    const user = snapshot.val() || {};
+    const ratingCount = Number(user.ratingCount) || 0;
+    const ratingSum = Number(user.ratingSum) || 0;
+    return res.json({ success: true, ratingCount, ratingAverage: ratingCount ? Number((ratingSum / ratingCount).toFixed(2)) : 0 });
+  } catch (error) {
+    console.error('Erro ao buscar resumo de avaliações:', error);
+    return res.status(500).json({ error: 'Erro interno ao buscar resumo de avaliações.' });
   }
 });
 
