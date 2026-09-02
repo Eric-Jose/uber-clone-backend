@@ -4,8 +4,8 @@ const dotenv = require('dotenv');
 const admin = require('firebase-admin');
 const http = require('http');
 const socketIo = require('socket.io');
+const jwt = require('jsonwebtoken');
 
-// Rotas
 const authRoutes = require('./routes/auth');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
@@ -15,12 +15,7 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-
-const allowedOrigins = [
-  'https://uber-clone-eric.vercel.app',
-  'http://localhost:3000'
-];
-
+const allowedOrigins = ['https://uber-clone-eric.vercel.app', 'http://localhost:3000'];
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
@@ -34,11 +29,7 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 const io = socketIo(server, {
-  cors: {
-    origin: allowedOrigins,
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
+  cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true }
 });
 
 if (!admin.apps.length) {
@@ -59,20 +50,13 @@ app.use('/api/auth', authRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
+app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Autenticação do Socket.IO usando o mesmo JWT do backend.
-io.use((socket, next) => {
+aio.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '');
     if (!token) return next(new Error('Não autenticado'));
-
-    const jwt = require('jsonwebtoken');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    socket.user = decoded;
+    socket.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
   } catch (error) {
     next(new Error('Token inválido ou expirado'));
@@ -89,7 +73,7 @@ io.on('connection', (socket) => {
       const ride = snap.val();
       if (!ride) return;
       const uid = socket.user.uid;
-      if (ride.passengerId !== uid && ride.driverId !== uid) return;
+      if (ride.userId !== uid && ride.driverId !== uid) return;
       socket.join(`ride_${rideId}`);
     } catch (error) {
       console.error('Erro ao entrar na corrida:', error.message);
@@ -102,26 +86,28 @@ io.on('connection', (socket) => {
 
   socket.on('join-drivers-room', async () => {
     try {
-      const snap = await db.ref(`drivers/${socket.user.uid}`).once('value');
+      const snap = await db.ref(`users/${socket.user.uid}`).once('value');
       const driver = snap.val();
-      if (driver?.status === 'available') socket.join('available_drivers');
+      if (driver?.userType === 'driver' && driver?.isOnline === true) socket.join('available_drivers');
     } catch (error) {
       console.error('Erro ao entrar na sala de motoristas:', error.message);
     }
   });
 
   socket.on('driver-location', async (data = {}) => {
-    const { rideId, latitude, longitude } = data;
+    const { rideId } = data;
+    const latitude = Number(data.latitude ?? data.lat);
+    const longitude = Number(data.longitude ?? data.lng);
     const driverId = socket.user.uid;
-    if (!rideId || !Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) return;
+    if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
 
     try {
       const snap = await db.ref(`rides/${rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== driverId) return;
-
-      const location = { latitude: Number(latitude), longitude: Number(longitude), timestamp: Date.now() };
+      const location = { latitude, longitude, lat: latitude, lng: longitude, timestamp: Date.now() };
       await db.ref(`locations/${driverId}`).set(location);
+      await db.ref(`users/${driverId}`).update({ currentLocation: { lat: latitude, lng: longitude }, lastLocationUpdate: new Date().toISOString() });
       io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
     } catch (error) {
       console.error('Erro na localização:', error.message);
@@ -129,8 +115,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('request-ride', async (data = {}) => {
-    if (data.passengerId && data.passengerId !== socket.user.uid) return;
-    if (data.rideId) io.to('available_drivers').emit('new-ride-request', { ...data, passengerId: socket.user.uid });
+    if (!data.rideId) return;
+    try {
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const ride = snap.val();
+      if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
+      io.to('available_drivers').emit('new-ride-request', { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance });
+    } catch (error) {
+      console.error('Erro ao divulgar corrida:', error.message);
+    }
   });
 
   socket.on('accept-ride', async (data = {}) => {
@@ -138,11 +131,12 @@ io.on('connection', (socket) => {
     try {
       const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
-      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'SEARCHING') return;
+      // A aceitação é persistida pela rota HTTP; aqui apenas notificamos a sala.
+      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
       socket.join(`ride_${data.rideId}`);
       io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid });
     } catch (error) {
-      console.error('Erro ao aceitar corrida:', error.message);
+      console.error('Erro ao notificar aceitação:', error.message);
     }
   });
 
@@ -150,7 +144,7 @@ io.on('connection', (socket) => {
     if (!data.rideId) return;
     const snap = await db.ref(`rides/${data.rideId}`).once('value');
     const ride = snap.val();
-    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
+    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
     io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
   });
 
@@ -158,13 +152,11 @@ io.on('connection', (socket) => {
     if (!data.rideId) return;
     const snap = await db.ref(`rides/${data.rideId}`).once('value');
     const ride = snap.val();
-    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
+    if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
     io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
   });
 
-  socket.on('disconnect', () => {
-    console.log('Cliente Socket.IO desconectado:', socket.id);
-  });
+  socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
 });
 
 const PORT = process.env.PORT || 5000;
