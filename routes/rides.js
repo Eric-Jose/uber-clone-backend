@@ -60,9 +60,10 @@ router.post('/accept', async (req, res) => {
   }
 });
 
-router.patch('/status', async (req, res) => {
+async function updateRideStatus(req, res) {
   try {
-    const { rideId, status } = req.body;
+    const rideId = req.params.rideId || req.body.rideId;
+    const { status } = req.body;
     if (!rideId || !VALID_STATUSES.includes(status)) return res.status(400).json({ error: 'Status de corrida inválido.' });
 
     const rideRef = db.ref(`rides/${rideId}`);
@@ -77,21 +78,30 @@ router.patch('/status', async (req, res) => {
       SEARCHING: ['CANCELLED'],
       ACCEPTED: ['IN_PROGRESS', 'CANCELLED'],
       IN_PROGRESS: ['COMPLETED', 'CANCELLED'],
-      COMPLETED: [], CANCELLED: []
+      COMPLETED: [],
+      CANCELLED: []
     };
-    if (!allowedTransitions[ride.status].includes(status)) return res.status(409).json({ error: `Não é possível mudar de ${ride.status} para ${status}.` });
+    if (!allowedTransitions[ride.status]?.includes(status)) {
+      return res.status(409).json({ error: `Não é possível mudar de ${ride.status} para ${status}.` });
+    }
 
     const passengerCanCancel = status === 'CANCELLED' && ride.userId === uid;
     const driverCanChange = ride.driverId === uid && ['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(status);
     if (!passengerCanCancel && !driverCanChange) return res.status(403).json({ error: 'Você não tem permissão para essa mudança.' });
 
     await rideRef.update({ status, updatedAt: admin.database.ServerValue.TIMESTAMP });
-    return res.json({ success: true, status });
+    const updatedSnapshot = await rideRef.get();
+    return res.json({ success: true, status, ride: updatedSnapshot.val() });
   } catch (error) {
     console.error('Erro ao atualizar status:', error);
     return res.status(500).json({ error: 'Erro ao atualizar status da corrida.' });
   }
-});
+}
+
+// Formato principal usado pelo aplicativo: PATCH /api/rides/:rideId/status
+router.patch('/:rideId/status', updateRideStatus);
+// Compatibilidade com clientes antigos: PATCH /api/rides/status + rideId no body
+router.patch('/status', updateRideStatus);
 
 router.get('/:rideId', async (req, res) => {
   try {
