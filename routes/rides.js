@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 
 const db = admin.database();
 const VALID_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
+const ACTIVE_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS'];
 
 router.use(authenticate);
 
@@ -17,6 +18,14 @@ router.post('/request', async (req, res) => {
     const userSnapshot = await db.ref(`users/${userId}`).get();
     const user = userSnapshot.val();
     if (!user || user.userType !== 'passenger') return res.status(403).json({ error: 'Somente passageiros podem solicitar corridas.' });
+
+    const ridesSnapshot = await db.ref('rides').orderByChild('userId').equalTo(userId).get();
+    let activeRide = null;
+    ridesSnapshot.forEach(child => {
+      const ride = child.val();
+      if (ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
+    });
+    if (activeRide) return res.status(409).json({ error: 'Você já possui uma corrida em andamento.', ride: activeRide });
 
     const newRideRef = db.ref('rides').push();
     const rideData = {
@@ -41,6 +50,7 @@ router.post('/accept', async (req, res) => {
     const driverSnapshot = await db.ref(`users/${driverId}`).get();
     const driver = driverSnapshot.val();
     if (!driver || driver.userType !== 'driver') return res.status(403).json({ error: 'Somente motoristas podem aceitar corridas.' });
+    if (driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Motorista ainda não foi aprovado.' });
     if (!driver.isOnline) return res.status(409).json({ error: 'Motorista está offline.' });
 
     const rideRef = db.ref(`rides/${rideId}`);
@@ -63,7 +73,7 @@ router.post('/accept', async (req, res) => {
 async function updateRideStatus(req, res) {
   try {
     const rideId = req.params.rideId || req.body.rideId;
-    const { status } = req.body;
+    const { status, cancellationReason } = req.body;
     if (!rideId || !VALID_STATUSES.includes(status)) return res.status(400).json({ error: 'Status de corrida inválido.' });
 
     const rideRef = db.ref(`rides/${rideId}`);
@@ -89,7 +99,13 @@ async function updateRideStatus(req, res) {
     const driverCanChange = ride.driverId === uid && ['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(status);
     if (!passengerCanCancel && !driverCanChange) return res.status(403).json({ error: 'Você não tem permissão para essa mudança.' });
 
-    await rideRef.update({ status, updatedAt: admin.database.ServerValue.TIMESTAMP });
+    const update = { status, updatedAt: admin.database.ServerValue.TIMESTAMP };
+    if (status === 'CANCELLED') {
+      update.cancelledBy = uid;
+      update.cancelledAt = admin.database.ServerValue.TIMESTAMP;
+      if (cancellationReason) update.cancellationReason = String(cancellationReason).slice(0, 200);
+    }
+    await rideRef.update(update);
     const updatedSnapshot = await rideRef.get();
     return res.json({ success: true, status, ride: updatedSnapshot.val() });
   } catch (error) {
@@ -98,9 +114,7 @@ async function updateRideStatus(req, res) {
   }
 }
 
-// Formato principal usado pelo aplicativo: PATCH /api/rides/:rideId/status
 router.patch('/:rideId/status', updateRideStatus);
-// Compatibilidade com clientes antigos: PATCH /api/rides/status + rideId no body
 router.patch('/status', updateRideStatus);
 
 router.get('/:rideId', async (req, res) => {
