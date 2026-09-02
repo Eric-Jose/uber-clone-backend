@@ -122,6 +122,17 @@ io.on('connection', (socket) => {
     } catch (error) { console.error('Erro ao notificar aceitação:', error.message); }
   });
 
+  socket.on('ride-cancelled', async (data = {}) => {
+    if (!data.rideId) return;
+    try {
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const ride = snap.val();
+      const uid = socket.user.uid;
+      if (!ride || (ride.userId !== uid && ride.driverId !== uid) || ride.status !== 'CANCELLED') return;
+      io.to(`ride_${data.rideId}`).emit('ride-cancelled', { rideId: data.rideId, cancelledBy: ride.cancelledBy || uid, cancellationReason: ride.cancellationReason || null });
+    } catch (error) { console.error('Erro ao notificar cancelamento:', error.message); }
+  });
+
   socket.on('start-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
