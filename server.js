@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
 const locationRoutes = require('./routes/location');
+const ratingRoutes = require('./routes/ratings');
 
 dotenv.config();
 
@@ -48,6 +49,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
+app.use('/api/ratings', ratingRoutes);
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 io.use((socket, next) => {
