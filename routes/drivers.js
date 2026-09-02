@@ -6,6 +6,18 @@ const { authenticate } = require('../middleware/auth');
 const db = admin.database();
 router.use(authenticate);
 
+async function requireAdmin(req, res, next) {
+  try {
+    const snap = await db.ref(`users/${req.user.uid}`).get();
+    const user = snap.val();
+    if (!user || user.userType !== 'admin') return res.status(403).json({ error: 'Acesso administrativo necessário.' });
+    req.adminUser = user;
+    next();
+  } catch (error) {
+    return res.status(500).json({ error: 'Não foi possível validar o administrador.' });
+  }
+}
+
 router.post('/register', async (req, res) => {
   try {
     const uid = req.user.uid;
@@ -38,7 +50,6 @@ router.post('/register', async (req, res) => {
       status: 'pending', submittedAt
     };
 
-    // Cartões, senhas e dados bancários completos não são armazenados nesta rota.
     await db.ref(`driverApplications/${uid}`).set(application);
     await db.ref(`users/${uid}`).update({
       userType: 'driver', driverApprovalStatus: 'pending', isOnline: false,
@@ -54,6 +65,47 @@ router.post('/register', async (req, res) => {
   }
 });
 
+// Lista de solicitações para o painel administrativo.
+router.get('/applications', requireAdmin, async (req, res) => {
+  try {
+    const snapshot = await db.ref('driverApplications').get();
+    const applications = [];
+    snapshot.forEach((child) => {
+      const application = child.val() || {};
+      applications.push({ ...application, uid: child.key, documentCount: Array.isArray(application.documents) ? application.documents.length : 0 });
+    });
+    applications.sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+    return res.json({ total: applications.length, pending: applications.filter((item) => item.status === 'pending').length, applications });
+  } catch (error) {
+    console.error('Erro ao listar solicitações:', error);
+    return res.status(500).json({ error: 'Erro ao listar solicitações de motoristas.' });
+  }
+});
+
+router.patch('/:driverId/approval', requireAdmin, async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    const status = String(req.body?.status || '').toLowerCase();
+    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Status deve ser approved ou rejected.' });
+
+    const applicationSnap = await db.ref(`driverApplications/${driverId}`).get();
+    if (!applicationSnap.exists()) return res.status(404).json({ error: 'Solicitação de motorista não encontrada.' });
+    const application = applicationSnap.val();
+    const now = new Date().toISOString();
+
+    await db.ref(`driverApplications/${driverId}`).update({ status, reviewedAt: now, reviewedBy: req.user.uid });
+    await db.ref(`users/${driverId}`).update({
+      userType: 'driver', driverApprovalStatus: status, isOnline: false,
+      driverApprovalReviewedAt: now, driverApprovalReviewedBy: req.user.uid
+    });
+
+    return res.json({ success: true, uid: driverId, status, reviewedAt: now, name: application.fullName || '' });
+  } catch (error) {
+    console.error('Erro ao revisar motorista:', error);
+    return res.status(500).json({ error: 'Erro ao atualizar aprovação do motorista.' });
+  }
+});
+
 router.get('/available', async (req, res) => {
   try {
     const lat = Number(req.query.lat), lng = Number(req.query.lng), radius = Number(req.query.radius ?? 5);
@@ -62,7 +114,7 @@ router.get('/available', async (req, res) => {
     const drivers = [];
     driversSnapshot.forEach((childSnapshot) => {
       const driver = childSnapshot.val();
-      if (!driver.isOnline || !driver.currentLocation) return;
+      if (driver.driverApprovalStatus !== 'approved' || !driver.isOnline || !driver.currentLocation) return;
       const driverLat = Number(driver.currentLocation.lat ?? driver.currentLocation.latitude), driverLng = Number(driver.currentLocation.lng ?? driver.currentLocation.longitude);
       if (!Number.isFinite(driverLat) || !Number.isFinite(driverLng)) return;
       const distance = calculateDistance(lat, lng, driverLat, driverLng);
@@ -80,7 +132,7 @@ router.post('/:driverId/status', async (req, res) => {
     if (typeof isOnline !== 'boolean') return res.status(400).json({ error: 'isOnline deve ser booleano.' });
     const driverSnapshot = await db.ref(`users/${driverId}`).get(), driver = driverSnapshot.val();
     if (!driver || driver.userType !== 'driver') return res.status(403).json({ error: 'Usuário não é motorista.' });
-    if (isOnline && driver.driverApprovalStatus && driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Seu cadastro de motorista ainda não foi aprovado.' });
+    if (isOnline && driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Seu cadastro de motorista ainda não foi aprovado.' });
 
     const update = { isOnline, lastLocationUpdate: new Date().toISOString() };
     if (currentLocation !== undefined) {
