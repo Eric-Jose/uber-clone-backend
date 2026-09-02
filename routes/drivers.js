@@ -65,20 +65,23 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Lista de solicitações para o painel administrativo.
 router.get('/applications', requireAdmin, async (req, res) => {
   try {
     const snapshot = await db.ref('driverApplications').get();
     const applications = [];
     snapshot.forEach((child) => {
       const application = child.val() || {};
-      applications.push({ ...application, uid: child.key, documentCount: Array.isArray(application.documents) ? application.documents.length : 0 });
+      applications.push({
+        ...application,
+        cpf: application.cpf ? `${String(application.cpf).slice(0, 3)}***${String(application.cpf).slice(-2)}` : '',
+        driverLicense: application.driverLicense ? `${String(application.driverLicense).slice(0, 2)}***${String(application.driverLicense).slice(-2)}` : ''
+      });
     });
     applications.sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
-    return res.json({ total: applications.length, pending: applications.filter((item) => item.status === 'pending').length, applications });
+    return res.json({ total: applications.length, applications });
   } catch (error) {
-    console.error('Erro ao listar solicitações:', error);
-    return res.status(500).json({ error: 'Erro ao listar solicitações de motoristas.' });
+    console.error('Erro ao listar cadastros:', error);
+    return res.status(500).json({ error: 'Erro ao listar cadastros de motoristas.' });
   }
 });
 
@@ -88,20 +91,25 @@ router.patch('/:driverId/approval', requireAdmin, async (req, res) => {
     const status = String(req.body?.status || '').toLowerCase();
     if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Status deve ser approved ou rejected.' });
 
-    const applicationSnap = await db.ref(`driverApplications/${driverId}`).get();
-    if (!applicationSnap.exists()) return res.status(404).json({ error: 'Solicitação de motorista não encontrada.' });
-    const application = applicationSnap.val();
+    const userRef = db.ref(`users/${driverId}`);
+    const applicationRef = db.ref(`driverApplications/${driverId}`);
+    const [userSnapshot, applicationSnapshot] = await Promise.all([userRef.get(), applicationRef.get()]);
+    if (!userSnapshot.exists() || userSnapshot.val()?.userType !== 'driver') return res.status(404).json({ error: 'Motorista não encontrado.' });
+    if (!applicationSnapshot.exists()) return res.status(404).json({ error: 'Cadastro de motorista não encontrado.' });
+
     const now = new Date().toISOString();
+    const updates = {
+      driverApprovalStatus: status,
+      driverApprovedAt: status === 'approved' ? now : null,
+      driverApprovedBy: req.user.uid,
+      isOnline: false
+    };
+    await userRef.update(updates);
+    await applicationRef.update({ status, reviewedAt: now, reviewedBy: req.user.uid });
 
-    await db.ref(`driverApplications/${driverId}`).update({ status, reviewedAt: now, reviewedBy: req.user.uid });
-    await db.ref(`users/${driverId}`).update({
-      userType: 'driver', driverApprovalStatus: status, isOnline: false,
-      driverApprovalReviewedAt: now, driverApprovalReviewedBy: req.user.uid
-    });
-
-    return res.json({ success: true, uid: driverId, status, reviewedAt: now, name: application.fullName || '' });
+    return res.json({ success: true, driverId, status });
   } catch (error) {
-    console.error('Erro ao revisar motorista:', error);
+    console.error('Erro ao revisar cadastro:', error);
     return res.status(500).json({ error: 'Erro ao atualizar aprovação do motorista.' });
   }
 });
@@ -132,7 +140,7 @@ router.post('/:driverId/status', async (req, res) => {
     if (typeof isOnline !== 'boolean') return res.status(400).json({ error: 'isOnline deve ser booleano.' });
     const driverSnapshot = await db.ref(`users/${driverId}`).get(), driver = driverSnapshot.val();
     if (!driver || driver.userType !== 'driver') return res.status(403).json({ error: 'Usuário não é motorista.' });
-    if (isOnline && driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Seu cadastro de motorista ainda não foi aprovado.' });
+    if (driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Seu cadastro de motorista ainda não foi aprovado.' });
 
     const update = { isOnline, lastLocationUpdate: new Date().toISOString() };
     if (currentLocation !== undefined) {
@@ -156,7 +164,7 @@ router.get('/:driverId', async (req, res) => {
 
 router.post('/:driverId/rating', async (req, res) => {
   try {
-    const { driverId } = req.params, rating = Number(req.body.rating);
+    const { driverId, } = req.params, rating = Number(req.body.rating);
     const comment = typeof req.body.comment === 'string' ? req.body.comment.trim().slice(0, 500) : '';
     if (!Number.isFinite(rating) || rating < 1 || rating > 5) return res.status(400).json({ error: 'Avaliação deve ser entre 1 e 5' });
     if (driverId === req.user.uid) return res.status(403).json({ error: 'Motorista não pode avaliar a si mesmo.' });
