@@ -8,8 +8,6 @@ const jwt = require('jsonwebtoken');
 
 dotenv.config();
 
-// Firebase Admin precisa ser inicializado ANTES de carregar as rotas,
-// pois algumas rotas acessam admin.database()/admin.auth() no carregamento.
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -23,7 +21,6 @@ if (!admin.apps.length) {
 
 const db = admin.database();
 const auth = admin.auth();
-
 const authRoutes = require('./routes/auth');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
@@ -50,9 +47,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
-
 const io = socketIo(server, { cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true } });
-
 app.use('/api/auth', authRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides', rideRoutes);
@@ -68,6 +63,36 @@ io.use((socket, next) => {
     next();
   } catch (error) { next(new Error('Token inválido ou expirado')); }
 });
+
+function distanceKm(a, b) {
+  const lat1 = Number(a?.lat ?? a?.latitude);
+  const lon1 = Number(a?.lng ?? a?.longitude);
+  const lat2 = Number(b?.lat ?? b?.latitude);
+  const lon2 = Number(b?.lng ?? b?.longitude);
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Infinity;
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+async function findNearestDrivers(origin) {
+  const usersSnapshot = await db.ref('users').get();
+  const locationsSnapshot = await db.ref('locations').get();
+  const users = usersSnapshot.val() || {};
+  const locations = locationsSnapshot.val() || {};
+  const originLocation = origin?.location || origin?.currentLocation || origin;
+  const drivers = [];
+
+  for (const [uid, user] of Object.entries(users)) {
+    if (user?.userType !== 'driver' || user?.driverApprovalStatus !== 'approved' || user?.isOnline !== true) continue;
+    const location = user.currentLocation || locations[uid];
+    const distance = distanceKm(originLocation, location);
+    if (Number.isFinite(distance)) drivers.push({ uid, distance });
+  }
+  return drivers.sort((a, b) => a.distance - b.distance);
+}
 
 io.on('connection', (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
@@ -90,7 +115,10 @@ io.on('connection', (socket) => {
     try {
       const snap = await db.ref(`users/${socket.user.uid}`).once('value');
       const driver = snap.val();
-      if (driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true) socket.join('available_drivers');
+      if (driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true) {
+        socket.join('available_drivers');
+        socket.join(`driver_${socket.user.uid}`);
+      }
     } catch (error) { console.error('Erro ao entrar na sala de motoristas:', error.message); }
   });
 
@@ -114,11 +142,33 @@ io.on('connection', (socket) => {
   socket.on('request-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const rideRef = db.ref(`rides/${data.rideId}`);
+      const snap = await rideRef.once('value');
       const ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
-      io.to('available_drivers').emit('new-ride-request', { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance });
-    } catch (error) { console.error('Erro ao divulgar corrida:', error.message); }
+
+      const nearestDrivers = await findNearestDrivers(ride.origin);
+      const request = { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance };
+
+      if (!nearestDrivers.length) {
+        io.to('available_drivers').emit('new-ride-request', request);
+        return;
+      }
+
+      // Oferece primeiro ao motorista mais próximo. Os próximos recebem a oferta
+      // somente se ainda houver uma corrida SEARCHING, evitando várias aceitações.
+      let offered = false;
+      for (const driver of nearestDrivers) {
+        const current = (await rideRef.once('value')).val();
+        if (!current || current.status !== 'SEARCHING' || current.driverId) break;
+        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)) });
+        offered = true;
+        await new Promise(resolve => setTimeout(resolve, 8000));
+        const afterOffer = (await rideRef.once('value')).val();
+        if (!afterOffer || afterOffer.status !== 'SEARCHING' || afterOffer.driverId) break;
+      }
+      if (!offered) io.to('available_drivers').emit('new-ride-request', request);
+    } catch (error) { console.error('Erro ao encontrar motorista:', error.message); }
   });
 
   socket.on('accept-ride', async (data = {}) => {
