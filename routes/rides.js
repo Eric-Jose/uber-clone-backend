@@ -19,9 +19,11 @@ function normalizeLocation(value) {
 }
 
 router.post('/request', async (req, res) => {
+  let step = 'start';
   try {
     const { origin, destination, price, distance } = req.body || {};
     const userId = req.user.uid;
+    step = 'validate-payload';
 
     if (!origin || !destination) {
       return res.status(400).json({ error: 'Origem e destino são obrigatórios.' });
@@ -33,6 +35,7 @@ router.post('/request', async (req, res) => {
       return res.status(400).json({ error: 'A localização de origem e destino é inválida. Escolha o destino novamente.' });
     }
 
+    step = 'load-user';
     const userSnapshot = await db.ref(`users/${userId}`).get();
     const user = userSnapshot.val();
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
@@ -40,11 +43,13 @@ router.post('/request', async (req, res) => {
       return res.status(403).json({ error: 'Somente passageiros podem solicitar corridas.' });
     }
 
-    const ridesSnapshot = await db.ref('rides').orderByChild('userId').equalTo(userId).get();
+    step = 'check-active-rides';
+    // Evita depender de consulta indexada do Realtime Database.
+    const ridesSnapshot = await db.ref('rides').get();
     let activeRide = null;
     ridesSnapshot.forEach(child => {
       const ride = child.val();
-      if (ride && ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
+      if (ride && ride.userId === userId && ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
     });
 
     if (activeRide) {
@@ -60,6 +65,7 @@ router.post('/request', async (req, res) => {
       return res.status(400).json({ error: 'Dados de preço ou distância inválidos.' });
     }
 
+    step = 'create-ride';
     const newRideRef = db.ref('rides').push();
     const rideData = {
       id: newRideRef.key,
@@ -80,13 +86,15 @@ router.post('/request', async (req, res) => {
     };
 
     await newRideRef.set(rideData);
+    step = 'success';
     return res.status(201).json({ success: true, ride: rideData });
   } catch (error) {
-    console.error('Erro ao solicitar corrida:', error);
+    console.error('Erro ao solicitar corrida:', { step, message: error?.message, code: error?.code, stack: error?.stack });
     return res.status(500).json({
       error: 'Erro interno ao criar corrida.',
+      step,
       code: error?.code || 'UNKNOWN',
-      details: process.env.NODE_ENV === 'production' ? undefined : error?.message
+      details: error?.message || 'Erro desconhecido'
     });
   }
 });
