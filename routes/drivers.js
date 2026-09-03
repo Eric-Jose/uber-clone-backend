@@ -10,7 +10,7 @@ async function requireAdmin(req, res, next) {
   try {
     const snap = await db.ref(`users/${req.user.uid}`).get();
     const user = snap.val();
-    if (!user || user.userType !== 'admin') return res.status(403).json({ error: 'Acesso administrativo necessário.' });
+    if (!user || (user.userType !== 'admin' && user.role !== 'admin')) return res.status(403).json({ error: 'Acesso administrativo necessário.' });
     req.adminUser = user;
     next();
   } catch (error) { return res.status(500).json({ error: 'Não foi possível validar o administrador.' }); }
@@ -88,7 +88,10 @@ router.post('/register', async (req, res) => {
 
 router.get('/applications', requireAdmin, async (req,res) => {
   try {
-    const [applicationsSnapshot, usersSnapshot] = await Promise.all([db.ref('driverApplications').get(), db.ref('users').orderByChild('userType').equalTo('driver').get()]);
+    const [applicationsSnapshot, usersSnapshot] = await Promise.all([
+      db.ref('driverApplications').get(),
+      db.ref('users').get()
+    ]);
     const applicationsByUid = new Map();
 
     applicationsSnapshot.forEach((child) => {
@@ -98,6 +101,7 @@ router.get('/applications', requireAdmin, async (req,res) => {
 
     usersSnapshot.forEach((child) => {
       const user = child.val() || {};
+      if (user.userType !== 'driver') return;
       if (!applicationsByUid.has(child.key)) {
         applicationsByUid.set(child.key, sanitizeApplication(applicationFromUser(child.key, user)));
       }
@@ -107,17 +111,17 @@ router.get('/applications', requireAdmin, async (req,res) => {
     applications.sort((a,b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
 
     return res.json({ total:applications.length, applications });
-  } catch(error){ console.error('Erro ao listar cadastros:',error); return res.status(500).json({error:'Erro ao listar cadastros de motoristas.'}); }
+  } catch(error){ console.error('Erro ao listar cadastros:',error); return res.status(500).json({error:'Erro ao listar cadastros de motoristas.', details: process.env.NODE_ENV !== 'production' ? error.message : undefined}); }
 });
 
 router.get('/online-count', requireAdmin, async (req,res) => {
   try {
-    const snapshot = await db.ref('users').orderByChild('userType').equalTo('driver').get();
+    const snapshot = await db.ref('users').get();
     let online = 0;
     let approved = 0;
     snapshot.forEach((child) => {
       const driver = child.val() || {};
-      if (driver.driverApprovalStatus === 'approved') {
+      if (driver.userType === 'driver' && driver.driverApprovalStatus === 'approved') {
         approved += 1;
         if (driver.isOnline === true) online += 1;
       }
@@ -193,7 +197,7 @@ router.get('/me', async (req, res) => {
 
 router.post('/:driverId/status', async (req,res)=>{
   try{
-    const {driverId}=req.params,{isOnline,currentLocation}=req.body;
+    const {driverId} = req.params, {isOnline,currentLocation} = req.body;
     if(driverId!==req.user.uid)return res.status(403).json({error:'Você só pode alterar o próprio status.'});
     if(typeof isOnline!=='boolean')return res.status(400).json({error:'isOnline deve ser booleano.'});
     const driverSnapshot=await db.ref(`users/${driverId}`).get(),driver=driverSnapshot.val();
