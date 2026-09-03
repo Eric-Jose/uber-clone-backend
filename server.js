@@ -59,6 +59,7 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 const io = socketIo(server, { cors: { origin: isAllowedOrigin, methods: ['GET', 'POST'], credentials: true } });
+rideRoutes.setSocketIo(io);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
@@ -198,7 +199,7 @@ io.on('connection', (socket) => {
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
       socket.join(`ride_${data.rideId}`);
-      io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid });
+      io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid, ride });
     } catch (error) { console.error('Erro ao notificar aceitação:', error.message); }
   });
   socket.on('ride-cancelled', async (data = {}) => {
@@ -217,7 +218,7 @@ io.on('connection', (socket) => {
       const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
-      io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
+      io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId, ride });
     } catch (error) { console.error('Erro ao iniciar corrida:', error.message); }
   });
   socket.on('end-ride', async (data = {}) => {
@@ -226,7 +227,7 @@ io.on('connection', (socket) => {
       const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
-      io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
+      io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId, ride });
     } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
   });
   socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
