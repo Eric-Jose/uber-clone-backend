@@ -22,6 +22,7 @@ if (!admin.apps.length) {
 const db = admin.database();
 const auth = admin.auth();
 const authRoutes = require('./routes/auth');
+const passwordResetRoutes = require('./routes/password-reset');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
 const locationRoutes = require('./routes/location');
@@ -49,6 +50,7 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 const io = socketIo(server, { cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true } });
 app.use('/api/auth', authRoutes);
+app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
@@ -84,7 +86,6 @@ async function findNearestDrivers(origin) {
   const locations = locationsSnapshot.val() || {};
   const originLocation = origin?.location || origin?.currentLocation || origin;
   const drivers = [];
-
   for (const [uid, user] of Object.entries(users)) {
     if (user?.userType !== 'driver' || user?.driverApprovalStatus !== 'approved' || user?.isOnline !== true) continue;
     const location = user.currentLocation || locations[uid];
@@ -96,7 +97,6 @@ async function findNearestDrivers(origin) {
 
 io.on('connection', (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
-
   socket.on('join-ride-room', async (rideId) => {
     if (!rideId) return;
     try {
@@ -108,9 +108,7 @@ io.on('connection', (socket) => {
       socket.join(`ride_${rideId}`);
     } catch (error) { console.error('Erro ao entrar na corrida:', error.message); }
   });
-
   socket.on('leave-ride-room', (rideId) => { if (rideId) socket.leave(`ride_${rideId}`); });
-
   socket.on('join-drivers-room', async () => {
     try {
       const snap = await db.ref(`users/${socket.user.uid}`).once('value');
@@ -121,7 +119,6 @@ io.on('connection', (socket) => {
       }
     } catch (error) { console.error('Erro ao entrar na sala de motoristas:', error.message); }
   });
-
   socket.on('driver-location', async (data = {}) => {
     const { rideId } = data;
     const latitude = Number(data.latitude ?? data.lat);
@@ -138,7 +135,6 @@ io.on('connection', (socket) => {
       io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
     } catch (error) { console.error('Erro na localização:', error.message); }
   });
-
   socket.on('request-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
@@ -146,17 +142,9 @@ io.on('connection', (socket) => {
       const snap = await rideRef.once('value');
       const ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
-
       const nearestDrivers = await findNearestDrivers(ride.origin);
       const request = { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance };
-
-      if (!nearestDrivers.length) {
-        io.to('available_drivers').emit('new-ride-request', request);
-        return;
-      }
-
-      // Oferece primeiro ao motorista mais próximo. Os próximos recebem a oferta
-      // somente se ainda houver uma corrida SEARCHING, evitando várias aceitações.
+      if (!nearestDrivers.length) { io.to('available_drivers').emit('new-ride-request', request); return; }
       let offered = false;
       for (const driver of nearestDrivers) {
         const current = (await rideRef.once('value')).val();
@@ -170,7 +158,6 @@ io.on('connection', (socket) => {
       if (!offered) io.to('available_drivers').emit('new-ride-request', request);
     } catch (error) { console.error('Erro ao encontrar motorista:', error.message); }
   });
-
   socket.on('accept-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
@@ -181,7 +168,6 @@ io.on('connection', (socket) => {
       io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid });
     } catch (error) { console.error('Erro ao notificar aceitação:', error.message); }
   });
-
   socket.on('ride-cancelled', async (data = {}) => {
     if (!data.rideId) return;
     try {
@@ -192,7 +178,6 @@ io.on('connection', (socket) => {
       io.to(`ride_${data.rideId}`).emit('ride-cancelled', { rideId: data.rideId, cancelledBy: ride.cancelledBy || uid, cancellationReason: ride.cancellationReason || null });
     } catch (error) { console.error('Erro ao notificar cancelamento:', error.message); }
   });
-
   socket.on('start-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
@@ -202,7 +187,6 @@ io.on('connection', (socket) => {
       io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId });
     } catch (error) { console.error('Erro ao iniciar corrida:', error.message); }
   });
-
   socket.on('end-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
@@ -212,7 +196,6 @@ io.on('connection', (socket) => {
       io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
     } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
   });
-
   socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
 });
 
