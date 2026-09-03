@@ -179,7 +179,16 @@ io.on('connection', (socket) => {
       const ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
       const nearestDrivers = await findNearestDrivers(ride.origin);
-      const request = { rideId: data.rideId, passengerId: socket.user.uid, origin: ride.origin, destination: ride.destination, price: ride.price, distance: ride.distance };
+      const request = {
+        rideId: data.rideId,
+        passengerId: socket.user.uid,
+        passengerName: ride.passengerName || 'Passageiro',
+        passengerProfilePhoto: ride.passengerProfilePhoto || null,
+        origin: ride.origin,
+        destination: ride.destination,
+        price: ride.price,
+        distance: ride.distance
+      };
       if (!nearestDrivers.length) { io.to('available_drivers').emit('new-ride-request', request); return; }
       let offered = false;
       for (const driver of nearestDrivers) {
