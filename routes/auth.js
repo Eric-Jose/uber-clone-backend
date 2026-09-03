@@ -90,13 +90,8 @@ router.post('/admin-login', async (req, res) => {
       try {
         await firebasePasswordLogin(email, password);
       } catch (error) {
-        // If the predefined administrator credentials are used, repair the
-        // Firebase password so login remains available after a stale/mismatched account.
         if (email === DEFAULT_ADMIN_EMAIL.toLowerCase() && password === DEFAULT_ADMIN_PASSWORD) {
-          userRecord = await auth.updateUser(userRecord.uid, {
-            password: DEFAULT_ADMIN_PASSWORD,
-            disabled: false
-          });
+          userRecord = await auth.updateUser(userRecord.uid, { password: DEFAULT_ADMIN_PASSWORD, disabled: false });
         } else {
           return res.status(401).json({ error: 'Email ou senha inválidos' });
         }
@@ -120,6 +115,37 @@ router.post('/admin-login', async (req, res) => {
   } catch (error) {
     console.error('Erro no login administrativo:', error);
     return res.status(500).json({ error: 'Não foi possível entrar como administrador' });
+  }
+});
+
+// Allows an already authenticated administrator to replace the password without
+// requiring the old password. The JWT is verified and the database profile must
+// still have admin privileges, so this cannot be used by ordinary users.
+router.post('/admin/set-password', async (req, res) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Token não fornecido' });
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const userSnapshot = await db.ref(`users/${decoded.uid}`).get();
+    const userData = userSnapshot.val();
+    if (!userData || (userData.userType !== 'admin' && userData.role !== 'admin')) {
+      return res.status(403).json({ error: 'Acesso administrativo negado' });
+    }
+
+    const newPassword = String(req.body?.newPassword || '');
+    if (!newPassword) return res.status(400).json({ error: 'Informe a nova senha' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ter pelo menos 8 caracteres' });
+
+    await auth.updateUser(decoded.uid, { password: newPassword, disabled: false });
+    return res.json({ message: 'Senha administrativa alterada com sucesso' });
+  } catch (error) {
+    console.error('Erro ao definir senha administrativa:', error.message);
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Sessão expirada. Faça login novamente.' });
+    }
+    return res.status(400).json({ error: error.message || 'Não foi possível alterar a senha' });
   }
 });
 
