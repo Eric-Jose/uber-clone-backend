@@ -6,13 +6,29 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 
+dotenv.config();
+
+// Firebase Admin precisa ser inicializado ANTES de carregar as rotas,
+// pois algumas rotas acessam admin.database()/admin.auth() no carregamento.
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL
+    }),
+    databaseURL: process.env.FIREBASE_DATABASE_URL
+  });
+}
+
+const db = admin.database();
+const auth = admin.auth();
+
 const authRoutes = require('./routes/auth');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
 const locationRoutes = require('./routes/location');
 const ratingRoutes = require('./routes/ratings');
-
-dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
@@ -36,20 +52,6 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 const io = socketIo(server, { cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true } });
-
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL
-    }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL
-  });
-}
-
-const db = admin.database();
-const auth = admin.auth();
 
 app.use('/api/auth', authRoutes);
 app.use('/api/drivers', driverRoutes);
@@ -154,7 +156,7 @@ io.on('connection', (socket) => {
   socket.on('end-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
+      const snap = await db.ref(`rides/${data.rideId`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
       io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
