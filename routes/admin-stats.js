@@ -34,7 +34,7 @@ router.get('/overview', requireAdmin, async (req, res) => {
       if (user.userType === 'passenger') passengers += 1;
       if (user.userType === 'driver') {
         driversByUid.set(child.key, {
-          status: user.driverApprovalStatus || 'pending',
+          status: user.driverApprovalStatus || user.driverApplication?.status || 'pending',
           isOnline: user.isOnline === true
         });
       }
@@ -49,19 +49,23 @@ router.get('/overview', requireAdmin, async (req, res) => {
       });
     });
 
-    let drivers = 0;
     let approvedDrivers = 0;
     let pendingDrivers = 0;
     let rejectedDrivers = 0;
     let onlineDrivers = 0;
 
     for (const driver of driversByUid.values()) {
-      drivers += 1;
-      if (driver.status === 'approved') approvedDrivers += 1;
-      if (driver.status === 'pending') pendingDrivers += 1;
-      if (driver.status === 'rejected') rejectedDrivers += 1;
-      if (driver.status === 'approved' && driver.isOnline === true) onlineDrivers += 1;
+      if (driver.status === 'approved') {
+        approvedDrivers += 1;
+        if (driver.isOnline === true) onlineDrivers += 1;
+      } else if (driver.status === 'rejected') {
+        rejectedDrivers += 1;
+      } else {
+        pendingDrivers += 1;
+      }
     }
+
+    const drivers = driversByUid.size;
 
     ridesSnapshot.forEach((child) => {
       const ride = child.val();
