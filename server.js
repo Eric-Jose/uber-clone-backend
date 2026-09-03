@@ -37,6 +37,7 @@ if (!admin.apps.length) {
 const db = admin.database();
 const auth = admin.auth();
 const authRoutes = require('./routes/auth');
+const firebaseSessionRoutes = require('./routes/firebase-session');
 const passwordResetRoutes = require('./routes/password-reset');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
@@ -77,6 +78,7 @@ app.use(express.json({ limit: '1mb' }));
 const io = socketIo(server, { cors: { origin: isAllowedOrigin, methods: ['GET', 'POST'], credentials: true } });
 rideRoutes.setSocketIo(io);
 app.use('/api/auth', authRoutes);
+app.use('/api/auth/firebase-session', firebaseSessionRoutes);
 app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides/pending', pendingRideRoutes);
