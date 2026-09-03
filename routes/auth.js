@@ -53,13 +53,13 @@ router.post('/login', async (req, res) => {
     const userData = userSnapshot.val();
     if (!userData) return res.status(404).json({ error: 'Perfil do usuário não encontrado' });
 
-    let normalizedUser = { ...userData };
+    const normalizedUser = { ...userData };
     if (normalizedUser.userType === 'driver') {
       const mirroredApplication = normalizedUser.driverApplication || {};
       const recoveredStatus = normalizedUser.driverApprovalStatus || mirroredApplication.status || (normalizedUser.driverProfile ? 'pending' : null);
       if (recoveredStatus && normalizedUser.driverApprovalStatus !== recoveredStatus) {
         normalizedUser.driverApprovalStatus = recoveredStatus;
-        await db.ref(`users/${uid}`).update({ driverApprovalStatus: recoveredStatus, driverApplication: mirroredApplication.status ? mirroredApplication : undefined });
+        await db.ref(`users/${uid}`).update({ driverApprovalStatus: recoveredStatus });
       }
     }
 
