@@ -74,6 +74,29 @@ router.post('/login', async (req, res) => {
   }
 });
 
+router.post('/profile-photo', async (req, res) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Token não fornecido' });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const profilePhoto = String(req.body?.profilePhoto || '');
+    if (profilePhoto && !/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/.test(profilePhoto)) {
+      return res.status(400).json({ error: 'Formato de foto inválido.' });
+    }
+    if (profilePhoto.length > 900000) return res.status(413).json({ error: 'A foto processada é muito grande.' });
+    const userRef = db.ref(`users/${decoded.uid}`);
+    const snapshot = await userRef.get();
+    if (!snapshot.exists()) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    await userRef.update({ profilePhoto: profilePhoto || null, profilePhotoUpdatedAt: new Date().toISOString() });
+    return res.json({ success: true, profilePhoto: profilePhoto || '' });
+  } catch (error) {
+    console.error('Erro ao salvar foto de perfil:', error.message);
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') return res.status(401).json({ error: 'Sessão expirada. Faça login novamente.' });
+    return res.status(400).json({ error: error.message || 'Não foi possível salvar a foto de perfil.' });
+  }
+});
+
 router.post('/admin-login', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -143,7 +166,7 @@ router.post('/admin/change-password', async (req, res) => {
     const currentPassword = String(req.body?.currentPassword || '');
     const newPassword = String(req.body?.newPassword || '');
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Informe a senha atual e a nova senha' });
-    if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ser diferente da senha atual' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ter pelo menos 8 caracteres' });
     if (currentPassword === newPassword) return res.status(400).json({ error: 'A nova senha deve ser diferente da senha atual' });
     await firebasePasswordLogin(userData.email, currentPassword);
     await auth.updateUser(decoded.uid, { password: newPassword });
