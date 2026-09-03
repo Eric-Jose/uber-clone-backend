@@ -140,8 +140,23 @@ async function saveDriverLocation(driverId, latitude, longitude) {
   return location;
 }
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
+
+  // Inscrição automática: motorista aprovado e online entra na fila mesmo
+  // que o navegador ainda não tenha emitido explicitamente join-drivers-room.
+  try {
+    const userSnapshot = await db.ref(`users/${socket.user.uid}`).once('value');
+    const connectedUser = userSnapshot.val();
+    if (connectedUser?.userType === 'driver' && connectedUser?.driverApprovalStatus === 'approved' && connectedUser?.isOnline === true) {
+      socket.join('available_drivers');
+      socket.join(`driver_${socket.user.uid}`);
+      console.log('Motorista inscrito automaticamente nas salas de corridas:', socket.user.uid);
+    }
+  } catch (error) {
+    console.error('Erro ao inscrever motorista automaticamente:', error.message);
+  }
+
   socket.on('join-ride-room', async (rideId) => {
     if (!rideId) return;
     try {
