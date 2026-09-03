@@ -56,6 +56,25 @@ router.get('/applications', requireAdmin, async (req,res) => {
   } catch(error){ console.error('Erro ao listar cadastros:',error); return res.status(500).json({error:'Erro ao listar cadastros de motoristas.'}); }
 });
 
+router.get('/online-count', requireAdmin, async (req,res) => {
+  try {
+    const snapshot = await db.ref('users').orderByChild('userType').equalTo('driver').get();
+    let online = 0;
+    let approved = 0;
+    snapshot.forEach((child) => {
+      const driver = child.val() || {};
+      if (driver.driverApprovalStatus === 'approved') {
+        approved += 1;
+        if (driver.isOnline === true) online += 1;
+      }
+    });
+    return res.json({ online, approved });
+  } catch (error) {
+    console.error('Erro ao contar motoristas online:', error);
+    return res.status(500).json({ error: 'Erro ao consultar motoristas online.' });
+  }
+});
+
 router.patch('/:driverId/approval', requireAdmin, async (req,res) => {
   try {
     const {driverId}=req.params, status=String(req.body?.status||'').toLowerCase();
