@@ -166,6 +166,32 @@ router.get('/available', async (req,res) => {
   } catch(error){console.error('Erro ao listar motoristas:',error);return res.status(500).json({error:'Erro ao listar motoristas.'});}
 });
 
+router.get('/me', async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const snapshot = await db.ref(`users/${uid}`).get();
+    const driver = snapshot.val();
+    if (!driver || driver.userType !== 'driver') return res.status(403).json({ error: 'Usuário não é motorista.' });
+    return res.json({
+      success: true,
+      driver: {
+        uid,
+        name: driver.driverProfile?.fullName || driver.fullName || driver.name || driver.email || 'Motorista',
+        email: driver.email || '',
+        status: driver.driverApprovalStatus || 'pending',
+        isOnline: driver.isOnline === true,
+        currentLocation: driver.currentLocation || null,
+        vehicle: driver.driverProfile?.vehicle || null,
+        ratingAverage: Number(driver.ratingAverage ?? driver.rating ?? 0),
+        ratingCount: Number(driver.ratingCount || 0)
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar motorista atual:', error);
+    return res.status(500).json({ error: 'Erro ao buscar dados do motorista.' });
+  }
+});
+
 router.post('/:driverId/status', async (req,res)=>{
   try{
     const {driverId}=req.params,{isOnline,currentLocation}=req.body;
