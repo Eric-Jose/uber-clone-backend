@@ -15,7 +15,8 @@ if (!admin.apps.length) {
       privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL
     }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL
+    databaseURL: process.env.FIREBASE_DATABASE_URL,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
   });
 }
 
@@ -158,96 +159,3 @@ io.on('connection', (socket) => {
   });
 
   socket.on('driver-location', async (data = {}) => {
-    const { rideId } = data;
-    const latitude = Number(data.latitude ?? data.lat);
-    const longitude = Number(data.longitude ?? data.lng);
-    const driverId = socket.user.uid;
-    if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
-    try {
-      const snap = await db.ref(`rides/${rideId}`).once('value');
-      const ride = snap.val();
-      if (!ride || ride.driverId !== driverId || !['ACCEPTED', 'IN_PROGRESS'].includes(ride.status)) return;
-      const location = await saveDriverLocation(driverId, latitude, longitude);
-      io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
-    } catch (error) { console.error('Erro na localização:', error.message); }
-  });
-  socket.on('request-ride', async (data = {}) => {
-    if (!data.rideId) return;
-    try {
-      const rideRef = db.ref(`rides/${data.rideId}`);
-      const snap = await rideRef.once('value');
-      const ride = snap.val();
-      if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
-      const nearestDrivers = await findNearestDrivers(ride.origin);
-      const request = {
-        rideId: data.rideId,
-        passengerId: socket.user.uid,
-        passengerName: ride.passengerName || 'Passageiro',
-        passengerProfilePhoto: ride.passengerProfilePhoto || null,
-        origin: ride.origin,
-        destination: ride.destination,
-        price: ride.price,
-        distance: ride.distance
-      };
-      if (!nearestDrivers.length) { io.to('available_drivers').emit('new-ride-request', request); return; }
-      let offered = false;
-      for (const driver of nearestDrivers) {
-        const current = (await rideRef.once('value')).val();
-        if (!current || current.status !== 'SEARCHING' || current.driverId) break;
-        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)) });
-        offered = true;
-        await new Promise(resolve => setTimeout(resolve, 8000));
-        const afterOffer = (await rideRef.once('value')).val();
-        if (!afterOffer || afterOffer.status !== 'SEARCHING' || afterOffer.driverId) break;
-      }
-      if (!offered) io.to('available_drivers').emit('new-ride-request', request);
-    } catch (error) { console.error('Erro ao encontrar motorista:', error.message); }
-  });
-  socket.on('accept-ride', async (data = {}) => {
-    if (!data.rideId) return;
-    try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
-      const ride = snap.val();
-      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
-      socket.join(`ride_${data.rideId}`);
-      io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid, ride });
-    } catch (error) { console.error('Erro ao notificar aceitação:', error.message); }
-  });
-  socket.on('ride-cancelled', async (data = {}) => {
-    if (!data.rideId) return;
-    try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
-      const ride = snap.val();
-      const uid = socket.user.uid;
-      if (!ride || (ride.userId !== uid && ride.driverId !== uid) || ride.status !== 'CANCELLED') return;
-      io.to(`ride_${data.rideId}`).emit('ride-cancelled', { rideId: data.rideId, cancelledBy: ride.cancelledBy || uid, cancellationReason: ride.cancellationReason || null });
-    } catch (error) { console.error('Erro ao notificar cancelamento:', error.message); }
-  });
-  socket.on('start-ride', async (data = {}) => {
-    if (!data.rideId) return;
-    try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
-      const ride = snap.val();
-      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
-      io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId, ride });
-    } catch (error) { console.error('Erro ao iniciar corrida:', error.message); }
-  });
-  socket.on('end-ride', async (data = {}) => {
-    if (!data.rideId) return;
-    try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value');
-      const ride = snap.val();
-      if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
-      io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId, ride });
-    } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
-  });
-  socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
-});
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`Socket.IO ativo na porta ${PORT}`);
-});
-
-module.exports = { app, io, db, auth };
