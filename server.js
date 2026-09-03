@@ -15,7 +15,8 @@ if (!admin.apps.length) {
       privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL
     }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL
+    databaseURL: process.env.FIREBASE_DATABASE_URL,
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
   });
 }
 
@@ -238,7 +239,7 @@ io.on('connection', (socket) => {
       const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
-      io.to(`ride_${data.rideId`).emit('ride-ended', { rideId: data.rideId, ride });
+      io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId, ride });
     } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
   });
   socket.on('disconnect', () => console.log('Cliente Socket.IO desconectado:', socket.id));
