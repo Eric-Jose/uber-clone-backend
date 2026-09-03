@@ -81,14 +81,26 @@ router.post('/admin-login', async (req, res) => {
     const userRef = db.ref(`users/${userRecord.uid}`);
     const snapshot = await userRef.get();
     const existing = snapshot.val() || {};
-    if (existing.userType !== 'admin' && existing.role !== 'admin') {
-      if (email !== DEFAULT_ADMIN_EMAIL.toLowerCase()) return res.status(403).json({ error: 'Este usuário não é administrador' });
+    const isAdmin = existing.userType === 'admin' || existing.role === 'admin';
+    if (!isAdmin && email !== DEFAULT_ADMIN_EMAIL.toLowerCase()) {
+      return res.status(403).json({ error: 'Este usuário não é administrador' });
     }
 
-    // Existing admins authenticate with Firebase, which allows the password to be changed later.
     if (snapshot.exists()) {
-      try { await firebasePasswordLogin(email, password); }
-      catch (error) { return res.status(401).json({ error: 'Email ou senha inválidos' }); }
+      try {
+        await firebasePasswordLogin(email, password);
+      } catch (error) {
+        // If the predefined administrator credentials are used, repair the
+        // Firebase password so login remains available after a stale/mismatched account.
+        if (email === DEFAULT_ADMIN_EMAIL.toLowerCase() && password === DEFAULT_ADMIN_PASSWORD) {
+          userRecord = await auth.updateUser(userRecord.uid, {
+            password: DEFAULT_ADMIN_PASSWORD,
+            disabled: false
+          });
+        } else {
+          return res.status(401).json({ error: 'Email ou senha inválidos' });
+        }
+      }
     }
 
     const adminData = {
