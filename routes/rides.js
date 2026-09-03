@@ -56,6 +56,8 @@ router.post('/request', async (req, res) => {
       id: newRideRef.key,
       userId,
       driverId: null,
+      passengerName: user.name || user.email || 'Passageiro',
+      passengerProfilePhoto: user.profilePhoto || null,
       origin: { address: String(origin.address || origin.display_name || 'Minha localização atual'), location: originLocation },
       destination: { address: String(destination.address || destination.display_name || 'Destino'), location: destinationLocation },
       price: safePrice,
@@ -90,6 +92,8 @@ router.post('/accept', async (req, res) => {
     const result = await rideRef.transaction((ride) => {
       if (!ride || ride.status !== 'SEARCHING' || ride.driverId) return;
       ride.driverId = driverId;
+      ride.driverName = driver.name || driver.email || 'Motorista';
+      ride.driverProfilePhoto = driver.profilePhoto || null;
       ride.status = 'ACCEPTED';
       ride.acceptedAt = admin.database.ServerValue.TIMESTAMP;
       return ride;
