@@ -46,7 +46,9 @@ async function main() {
     user = await auth.createUser({ email, password, displayName: name, emailVerified: false });
   }
 
-  const existing = (await db.ref(`users/${user.uid}`).get()).val() || {};
+  const userRef = db.ref(`users/${user.uid}`);
+  const snapshot = await userRef.get();
+  const existing = snapshot.val() || {};
   const userData = {
     ...existing,
     uid: user.uid,
@@ -59,7 +61,8 @@ async function main() {
     ...(existing.createdAt ? {} : { createdAt: new Date().toISOString() })
   };
 
-  await db.ref(`users/${user.uid}`).set(userData);
+  // Atualiza somente o registro do administrador; nunca substitui a coleção /users inteira.
+  await userRef.update(userData);
 
   console.log('\nADMINISTRADOR CONFIGURADO COM SUCESSO');
   console.log(`Email: ${email}`);
