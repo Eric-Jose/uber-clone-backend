@@ -28,6 +28,7 @@ const rideRoutes = require('./routes/rides');
 const pendingRideRoutes = require('./routes/pending-rides');
 const locationRoutes = require('./routes/location');
 const ratingRoutes = require('./routes/ratings');
+const adminStatsRoutes = require('./routes/admin-stats');
 
 const app = express();
 const server = http.createServer(app);
@@ -67,6 +68,7 @@ app.use('/api/rides/pending', pendingRideRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
+app.use('/api/admin-stats', adminStatsRoutes);
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 io.use((socket, next) => {
