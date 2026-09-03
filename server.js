@@ -8,15 +8,29 @@ const jwt = require('jsonwebtoken');
 
 dotenv.config();
 
+const requiredFirebaseEnv = [
+  'FIREBASE_PROJECT_ID',
+  'FIREBASE_CLIENT_EMAIL',
+  'FIREBASE_PRIVATE_KEY',
+  'FIREBASE_DATABASE_URL'
+];
+const missingFirebaseEnv = requiredFirebaseEnv.filter((key) => !process.env[key]);
+
+if (missingFirebaseEnv.length) {
+  console.error(`Configuração Firebase incompleta. Variáveis ausentes: ${missingFirebaseEnv.join(', ')}`);
+  throw new Error('Firebase Admin não pode ser inicializado: variáveis de ambiente obrigatórias ausentes.');
+}
+
 if (!admin.apps.length) {
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      privateKey,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL
     }),
     databaseURL: process.env.FIREBASE_DATABASE_URL,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || undefined
   });
 }
 
@@ -71,6 +85,12 @@ app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/admin-stats', adminStatsRoutes);
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+app.use((error, req, res, next) => {
+  console.error('Erro não tratado na API:', error?.stack || error);
+  if (res.headersSent) return next(error);
+  return res.status(500).json({ error: 'Erro interno do servidor.' });
+});
 
 io.use((socket, next) => {
   try {
