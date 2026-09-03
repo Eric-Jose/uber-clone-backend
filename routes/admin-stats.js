@@ -19,26 +19,49 @@ async function requireAdmin(req, res, next) {
 
 router.get('/overview', requireAdmin, async (req, res) => {
   try {
-    const [usersSnapshot, ridesSnapshot] = await Promise.all([
+    const [usersSnapshot, ridesSnapshot, applicationsSnapshot] = await Promise.all([
       db.ref('users').get(),
-      db.ref('rides').get()
+      db.ref('rides').get(),
+      db.ref('driverApplications').get()
     ]);
 
     let passengers = 0;
-    let drivers = 0;
-    let approvedDrivers = 0;
-    let onlineDrivers = 0;
+    const driversByUid = new Map();
     const rides = [];
 
     usersSnapshot.forEach((child) => {
       const user = child.val() || {};
       if (user.userType === 'passenger') passengers += 1;
       if (user.userType === 'driver') {
-        drivers += 1;
-        if (user.driverApprovalStatus === 'approved') approvedDrivers += 1;
-        if (user.driverApprovalStatus === 'approved' && user.isOnline === true) onlineDrivers += 1;
+        driversByUid.set(child.key, {
+          status: user.driverApprovalStatus || 'pending',
+          isOnline: user.isOnline === true
+        });
       }
     });
+
+    applicationsSnapshot.forEach((child) => {
+      const application = child.val() || {};
+      const current = driversByUid.get(child.key) || {};
+      driversByUid.set(child.key, {
+        ...current,
+        status: application.status || current.status || 'pending'
+      });
+    });
+
+    let drivers = 0;
+    let approvedDrivers = 0;
+    let pendingDrivers = 0;
+    let rejectedDrivers = 0;
+    let onlineDrivers = 0;
+
+    for (const driver of driversByUid.values()) {
+      drivers += 1;
+      if (driver.status === 'approved') approvedDrivers += 1;
+      if (driver.status === 'pending') pendingDrivers += 1;
+      if (driver.status === 'rejected') rejectedDrivers += 1;
+      if (driver.status === 'approved' && driver.isOnline === true) onlineDrivers += 1;
+    }
 
     ridesSnapshot.forEach((child) => {
       const ride = child.val();
@@ -92,6 +115,8 @@ router.get('/overview', requireAdmin, async (req, res) => {
         passengers,
         drivers,
         approvedDrivers,
+        pendingDrivers,
+        rejectedDrivers,
         onlineDrivers,
         ridesToday,
         activeRides,
