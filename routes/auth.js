@@ -21,6 +21,19 @@ async function firebasePasswordLogin(email, password) {
   return response.data;
 }
 
+async function normalizeUser(userData, uid) {
+  const normalizedUser = { ...(userData || {}) };
+  if (normalizedUser.userType === 'driver') {
+    const mirroredApplication = normalizedUser.driverApplication || {};
+    const recoveredStatus = normalizedUser.driverApprovalStatus || mirroredApplication.status || (normalizedUser.driverProfile ? 'pending' : null);
+    if (recoveredStatus && normalizedUser.driverApprovalStatus !== recoveredStatus) {
+      normalizedUser.driverApprovalStatus = recoveredStatus;
+      await db.ref(`users/${uid}`).update({ driverApprovalStatus: recoveredStatus });
+    }
+  }
+  return normalizedUser;
+}
+
 router.post('/register', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -52,17 +65,7 @@ router.post('/login', async (req, res) => {
     const userSnapshot = await db.ref(`users/${uid}`).get();
     const userData = userSnapshot.val();
     if (!userData) return res.status(404).json({ error: 'Perfil do usuário não encontrado' });
-
-    const normalizedUser = { ...userData };
-    if (normalizedUser.userType === 'driver') {
-      const mirroredApplication = normalizedUser.driverApplication || {};
-      const recoveredStatus = normalizedUser.driverApprovalStatus || mirroredApplication.status || (normalizedUser.driverProfile ? 'pending' : null);
-      if (recoveredStatus && normalizedUser.driverApprovalStatus !== recoveredStatus) {
-        normalizedUser.driverApprovalStatus = recoveredStatus;
-        await db.ref(`users/${uid}`).update({ driverApprovalStatus: recoveredStatus });
-      }
-    }
-
+    const normalizedUser = await normalizeUser(userData, uid);
     const token = createToken(uid, email);
     return res.json({ message: 'Login realizado com sucesso', token, user: normalizedUser });
   } catch (error) {
@@ -140,7 +143,7 @@ router.post('/admin/change-password', async (req, res) => {
     const currentPassword = String(req.body?.currentPassword || '');
     const newPassword = String(req.body?.newPassword || '');
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Informe a senha atual e a nova senha' });
-    if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ter pelo menos 8 caracteres' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'A nova senha deve ser diferente da senha atual' });
     if (currentPassword === newPassword) return res.status(400).json({ error: 'A nova senha deve ser diferente da senha atual' });
     await firebasePasswordLogin(userData.email, currentPassword);
     await auth.updateUser(decoded.uid, { password: newPassword });
@@ -161,7 +164,8 @@ router.get('/verify', async (req, res) => {
     const userSnapshot = await db.ref(`users/${decoded.uid}`).get();
     const userData = userSnapshot.val();
     if (!userData) return res.status(401).json({ error: 'Usuário não encontrado' });
-    return res.json({ valid: true, user: userData });
+    const normalizedUser = await normalizeUser(userData, decoded.uid);
+    return res.json({ valid: true, user: normalizedUser });
   } catch (error) { return res.status(401).json({ error: 'Token inválido' }); }
 });
 
