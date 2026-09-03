@@ -25,6 +25,7 @@ const authRoutes = require('./routes/auth');
 const passwordResetRoutes = require('./routes/password-reset');
 const driverRoutes = require('./routes/drivers');
 const rideRoutes = require('./routes/rides');
+const pendingRideRoutes = require('./routes/pending-rides');
 const locationRoutes = require('./routes/location');
 const ratingRoutes = require('./routes/ratings');
 
@@ -61,6 +62,7 @@ const io = socketIo(server, { cors: { origin: isAllowedOrigin, methods: ['GET', 
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
+app.use('/api/rides/pending', pendingRideRoutes);
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
