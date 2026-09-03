@@ -15,19 +15,6 @@ function emitToRide(rideId, event, payload) {
   if (io && rideId) io.to(`ride_${rideId}`).emit(event, payload);
 }
 
-function emitNewRideRequest(ride) {
-  if (!io || !ride?.id) return;
-  io.to('available_drivers').emit('new-ride-request', {
-    rideId: ride.id,
-    passengerId: ride.userId,
-    origin: ride.origin,
-    destination: ride.destination,
-    price: ride.price,
-    distance: ride.distance,
-    source: 'ride-created'
-  });
-}
-
 function normalizeLocation(value) {
   const source = value?.location || value?.currentLocation || value || {};
   const lat = Number(source.lat ?? source.latitude);
@@ -77,7 +64,6 @@ router.post('/request', async (req, res) => {
       createdAt: admin.database.ServerValue.TIMESTAMP
     };
     await newRideRef.set(rideData);
-    emitNewRideRequest(rideData);
     step = 'success';
     return res.status(201).json({ success: true, ride: rideData });
   } catch (error) {
