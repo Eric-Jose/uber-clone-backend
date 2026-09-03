@@ -52,8 +52,19 @@ router.post('/login', async (req, res) => {
     const userSnapshot = await db.ref(`users/${uid}`).get();
     const userData = userSnapshot.val();
     if (!userData) return res.status(404).json({ error: 'Perfil do usuário não encontrado' });
+
+    let normalizedUser = { ...userData };
+    if (normalizedUser.userType === 'driver') {
+      const mirroredApplication = normalizedUser.driverApplication || {};
+      const recoveredStatus = normalizedUser.driverApprovalStatus || mirroredApplication.status || (normalizedUser.driverProfile ? 'pending' : null);
+      if (recoveredStatus && normalizedUser.driverApprovalStatus !== recoveredStatus) {
+        normalizedUser.driverApprovalStatus = recoveredStatus;
+        await db.ref(`users/${uid}`).update({ driverApprovalStatus: recoveredStatus, driverApplication: mirroredApplication.status ? mirroredApplication : undefined });
+      }
+    }
+
     const token = createToken(uid, email);
-    return res.json({ message: 'Login realizado com sucesso', token, user: userData });
+    return res.json({ message: 'Login realizado com sucesso', token, user: normalizedUser });
   } catch (error) {
     console.error('Erro ao fazer login:', error.response?.data || error.message);
     return res.status(401).json({ error: 'Email ou senha inválidos' });
