@@ -9,35 +9,85 @@ const ACTIVE_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS'];
 
 router.use(authenticate);
 
+function normalizeLocation(value) {
+  const source = value?.location || value?.currentLocation || value || {};
+  const lat = Number(source.lat ?? source.latitude);
+  const lng = Number(source.lng ?? source.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+
 router.post('/request', async (req, res) => {
   try {
-    const { origin, destination, price, distance } = req.body;
+    const { origin, destination, price, distance } = req.body || {};
     const userId = req.user.uid;
-    if (!origin || !destination) return res.status(400).json({ error: 'Origem e destino são obrigatórios.' });
+
+    if (!origin || !destination) {
+      return res.status(400).json({ error: 'Origem e destino são obrigatórios.' });
+    }
+
+    const originLocation = normalizeLocation(origin);
+    const destinationLocation = normalizeLocation(destination);
+    if (!originLocation || !destinationLocation) {
+      return res.status(400).json({ error: 'A localização de origem e destino é inválida. Escolha o destino novamente.' });
+    }
 
     const userSnapshot = await db.ref(`users/${userId}`).get();
     const user = userSnapshot.val();
-    if (!user || user.userType !== 'passenger') return res.status(403).json({ error: 'Somente passageiros podem solicitar corridas.' });
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (user.userType !== 'passenger') {
+      return res.status(403).json({ error: 'Somente passageiros podem solicitar corridas.' });
+    }
 
     const ridesSnapshot = await db.ref('rides').orderByChild('userId').equalTo(userId).get();
     let activeRide = null;
     ridesSnapshot.forEach(child => {
       const ride = child.val();
-      if (ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
+      if (ride && ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
     });
-    if (activeRide) return res.status(409).json({ error: 'Você já possui uma corrida em andamento.', ride: activeRide });
+
+    if (activeRide) {
+      return res.status(409).json({
+        error: 'Você já possui uma corrida em andamento.',
+        ride: activeRide
+      });
+    }
+
+    const safePrice = Number(price);
+    const safeDistance = Number(distance);
+    if (!Number.isFinite(safePrice) || safePrice < 0 || !Number.isFinite(safeDistance) || safeDistance < 0) {
+      return res.status(400).json({ error: 'Dados de preço ou distância inválidos.' });
+    }
 
     const newRideRef = db.ref('rides').push();
     const rideData = {
-      id: newRideRef.key, userId, driverId: null, origin, destination,
-      price: Number(price) || 0, distance: Number(distance) || 0,
-      status: 'SEARCHING', createdAt: admin.database.ServerValue.TIMESTAMP
+      id: newRideRef.key,
+      userId,
+      driverId: null,
+      origin: {
+        address: String(origin.address || origin.display_name || 'Minha localização atual'),
+        location: originLocation
+      },
+      destination: {
+        address: String(destination.address || destination.display_name || 'Destino'),
+        location: destinationLocation
+      },
+      price: safePrice,
+      distance: safeDistance,
+      status: 'SEARCHING',
+      createdAt: admin.database.ServerValue.TIMESTAMP
     };
+
     await newRideRef.set(rideData);
     return res.status(201).json({ success: true, ride: rideData });
   } catch (error) {
     console.error('Erro ao solicitar corrida:', error);
-    return res.status(500).json({ error: 'Erro interno ao criar corrida.' });
+    return res.status(500).json({
+      error: 'Erro interno ao criar corrida.',
+      code: error?.code || 'UNKNOWN',
+      details: process.env.NODE_ENV === 'production' ? undefined : error?.message
+    });
   }
 });
 
