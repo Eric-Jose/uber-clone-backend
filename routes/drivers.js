@@ -16,6 +16,43 @@ async function requireAdmin(req, res, next) {
   } catch (error) { return res.status(500).json({ error: 'Não foi possível validar o administrador.' }); }
 }
 
+function sanitizeApplication(application = {}) {
+  return {
+    ...application,
+    cpf: application.cpf ? `${String(application.cpf).slice(0,3)}***${String(application.cpf).slice(-2)}` : '',
+    driverLicense: application.driverLicense ? `${String(application.driverLicense).slice(0,2)}***${String(application.driverLicense).slice(-2)}` : ''
+  };
+}
+
+function applicationFromUser(uid, user = {}) {
+  const profile = user.driverProfile || {};
+  const vehicle = profile.vehicle || {};
+  const address = profile.address || {};
+  const mirrored = user.driverApplication || {};
+  return {
+    uid,
+    fullName: profile.fullName || user.fullName || user.name || mirrored.fullName || '',
+    email: user.email || mirrored.email || '',
+    phone: profile.phone || user.phone || mirrored.phone || '',
+    cpf: profile.cpf || mirrored.cpf || '',
+    driverLicense: profile.driverLicense || mirrored.driverLicense || '',
+    licensePlate: vehicle.licensePlate || mirrored.licensePlate || '',
+    vehicleModel: vehicle.model || mirrored.vehicleModel || '',
+    vehicleColor: vehicle.color || mirrored.vehicleColor || '',
+    vehicleYear: vehicle.year || mirrored.vehicleYear || '',
+    address: address.address || mirrored.address || '',
+    city: address.city || mirrored.city || '',
+    state: address.state || mirrored.state || '',
+    documents: Array.isArray(mirrored.documents) ? mirrored.documents : [],
+    documentCount: Number(mirrored.documentCount || (Array.isArray(mirrored.documents) ? mirrored.documents.length : 0)),
+    status: mirrored.status || user.driverApprovalStatus || 'pending',
+    submittedAt: mirrored.submittedAt || user.driverRegisteredAt || user.createdAt || null,
+    reviewedAt: mirrored.reviewedAt || null,
+    reviewedBy: mirrored.reviewedBy || null,
+    recoveredFromUser: true
+  };
+}
+
 router.post('/register', async (req, res) => {
   try {
     const uid = req.user.uid, data = req.body || {};
@@ -35,13 +72,15 @@ router.post('/register', async (req, res) => {
       cpf:String(data.cpf).trim().slice(0,20), driverLicense:String(data.driverLicense).trim().slice(0,30), licensePlate:String(data.licensePlate).trim().toUpperCase().slice(0,10),
       vehicleModel:String(data.vehicleModel).trim().slice(0,80), vehicleColor:String(data.vehicleColor).trim().slice(0,40), vehicleYear,
       address:String(data.address).trim().slice(0,180), city:String(data.city).trim().slice(0,80), state:String(data.state).trim().toUpperCase().slice(0,2), documents,
+      documentCount: documents.length,
       status:'pending', submittedAt
     };
     await db.ref(`driverApplications/${uid}`).set(application);
-    await db.ref(`users/${uid}`).update({ userType:'driver', driverApprovalStatus:'pending', isOnline:false,
+    await db.ref(`users/${uid}`).update({ userType:'driver', driverApprovalStatus:'pending', isOnline:false, driverRegisteredAt: existingUser.driverRegisteredAt || submittedAt,
       driverProfile:{ fullName:application.fullName, phone:application.phone, cpf:application.cpf, driverLicense:application.driverLicense,
         vehicle:{ licensePlate:application.licensePlate, model:application.vehicleModel, color:application.vehicleColor, year:application.vehicleYear },
-        address:{ address:application.address, city:application.city, state:application.state } }
+        address:{ address:application.address, city:application.city, state:application.state } },
+      driverApplication: application
     });
     return res.status(201).json({ success:true, application:{ uid, status:'pending', submittedAt, documentCount:documents.length } });
   } catch (error) { console.error('Erro ao registrar motorista:', error); return res.status(500).json({ error:'Erro ao enviar cadastro de motorista.' }); }
@@ -49,9 +88,24 @@ router.post('/register', async (req, res) => {
 
 router.get('/applications', requireAdmin, async (req,res) => {
   try {
-    const snapshot = await db.ref('driverApplications').get(), applications=[];
-    snapshot.forEach((child) => { const application=child.val()||{}; applications.push({ ...application, cpf:application.cpf ? `${String(application.cpf).slice(0,3)}***${String(application.cpf).slice(-2)}`:'', driverLicense:application.driverLicense ? `${String(application.driverLicense).slice(0,2)}***${String(application.driverLicense).slice(-2)}`:'' }); });
-    applications.sort((a,b)=>String(b.submittedAt||'').localeCompare(String(a.submittedAt||'')));
+    const [applicationsSnapshot, usersSnapshot] = await Promise.all([db.ref('driverApplications').get(), db.ref('users').orderByChild('userType').equalTo('driver').get()]);
+    const applicationsByUid = new Map();
+
+    applicationsSnapshot.forEach((child) => {
+      const application = child.val() || {};
+      applicationsByUid.set(child.key, sanitizeApplication(application));
+    });
+
+    usersSnapshot.forEach((child) => {
+      const user = child.val() || {};
+      if (!applicationsByUid.has(child.key)) {
+        applicationsByUid.set(child.key, sanitizeApplication(applicationFromUser(child.key, user)));
+      }
+    });
+
+    const applications = Array.from(applicationsByUid.values());
+    applications.sort((a,b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+
     return res.json({ total:applications.length, applications });
   } catch(error){ console.error('Erro ao listar cadastros:',error); return res.status(500).json({error:'Erro ao listar cadastros de motoristas.'}); }
 });
@@ -82,10 +136,14 @@ router.patch('/:driverId/approval', requireAdmin, async (req,res) => {
     const userRef=db.ref(`users/${driverId}`), applicationRef=db.ref(`driverApplications/${driverId}`);
     const [userSnapshot,applicationSnapshot]=await Promise.all([userRef.get(),applicationRef.get()]);
     if(!userSnapshot.exists() || userSnapshot.val()?.userType!=='driver') return res.status(404).json({error:'Motorista não encontrado.'});
-    if(!applicationSnapshot.exists()) return res.status(404).json({error:'Cadastro de motorista não encontrado.'});
+    const user = userSnapshot.val() || {};
+    const existingApplication = applicationSnapshot.exists() ? applicationSnapshot.val() : applicationFromUser(driverId, user);
     const now=new Date().toISOString();
-    await userRef.update({driverApprovalStatus:status,driverApprovedAt:status==='approved'?now:null,driverApprovedBy:req.user.uid,isOnline:false});
-    await applicationRef.update({status,reviewedAt:now,reviewedBy:req.user.uid});
+    const updatedApplication = { ...existingApplication, uid: driverId, status, reviewedAt:now, reviewedBy:req.user.uid, recoveredFromUser: !applicationSnapshot.exists() };
+    await Promise.all([
+      userRef.update({driverApprovalStatus:status,driverApprovedAt:status==='approved'?now:null,driverApprovedBy:req.user.uid,isOnline:false, driverApplication: updatedApplication}),
+      applicationRef.set(updatedApplication)
+    ]);
     return res.json({success:true,driverId,status});
   } catch(error){ console.error('Erro ao revisar cadastro:',error); return res.status(500).json({error:'Erro ao atualizar aprovação do motorista.'}); }
 });
@@ -123,7 +181,7 @@ router.post('/:driverId/status', async (req,res)=>{
 });
 
 router.get('/:driverId', async (req,res)=>{
-  try{
+  try {
     const {driverId}=req.params;
     const driverSnapshot=await db.ref(`users/${driverId}`).get(),driver=driverSnapshot.val();
     if(!driver)return res.status(404).json({error:'Motorista não encontrado'});
