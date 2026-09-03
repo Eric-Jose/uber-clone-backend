@@ -30,6 +30,7 @@ const ratingRoutes = require('./routes/ratings');
 
 const app = express();
 const server = http.createServer(app);
+
 const allowedOrigins = [
   'https://uber-clone-web.vercel.app',
   'https://uber-clone-web-eric-jose.vercel.app',
@@ -37,9 +38,17 @@ const allowedOrigins = [
   'https://uber-clone-eric.vercel.app',
   'http://localhost:3000'
 ];
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  // Permite deployments/aliases HTTPS da Vercel sem abrir o CORS para outros hosts.
+  return /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
+};
+
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (isAllowedOrigin(origin)) return callback(null, true);
     return callback(new Error('Bloqueado pelo CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -47,8 +56,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
-const io = socketIo(server, { cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true } });
+const io = socketIo(server, { cors: { origin: isAllowedOrigin, methods: ['GET', 'POST'], credentials: true } });
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
