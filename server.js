@@ -42,7 +42,6 @@ const allowedOrigins = [
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
   if (allowedOrigins.includes(origin)) return true;
-  // Permite deployments/aliases HTTPS da Vercel sem abrir o CORS para outros hosts.
   return /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
 };
 
@@ -105,6 +104,16 @@ async function findNearestDrivers(origin) {
   return drivers.sort((a, b) => a.distance - b.distance);
 }
 
+async function saveDriverLocation(driverId, latitude, longitude) {
+  const location = { latitude, longitude, lat: latitude, lng: longitude, timestamp: Date.now() };
+  await db.ref(`locations/${driverId}`).set(location);
+  await db.ref(`users/${driverId}`).update({
+    currentLocation: { lat: latitude, lng: longitude },
+    lastLocationUpdate: new Date().toISOString()
+  });
+  return location;
+}
+
 io.on('connection', (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
   socket.on('join-ride-room', async (rideId) => {
@@ -129,6 +138,20 @@ io.on('connection', (socket) => {
       }
     } catch (error) { console.error('Erro ao entrar na sala de motoristas:', error.message); }
   });
+
+  socket.on('driver-presence-location', async (data = {}) => {
+    const latitude = Number(data.latitude ?? data.lat);
+    const longitude = Number(data.longitude ?? data.lng);
+    const driverId = socket.user.uid;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
+    try {
+      const snap = await db.ref(`users/${driverId}`).once('value');
+      const driver = snap.val();
+      if (driver?.userType !== 'driver' || driver?.driverApprovalStatus !== 'approved' || driver?.isOnline !== true) return;
+      await saveDriverLocation(driverId, latitude, longitude);
+    } catch (error) { console.error('Erro na localização do motorista online:', error.message); }
+  });
+
   socket.on('driver-location', async (data = {}) => {
     const { rideId } = data;
     const latitude = Number(data.latitude ?? data.lat);
@@ -139,9 +162,7 @@ io.on('connection', (socket) => {
       const snap = await db.ref(`rides/${rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== driverId || !['ACCEPTED', 'IN_PROGRESS'].includes(ride.status)) return;
-      const location = { latitude, longitude, lat: latitude, lng: longitude, timestamp: Date.now() };
-      await db.ref(`locations/${driverId}`).set(location);
-      await db.ref(`users/${driverId}`).update({ currentLocation: { lat: latitude, lng: longitude }, lastLocationUpdate: new Date().toISOString() });
+      const location = await saveDriverLocation(driverId, latitude, longitude);
       io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
     } catch (error) { console.error('Erro na localização:', error.message); }
   });
