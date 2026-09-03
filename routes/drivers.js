@@ -132,19 +132,18 @@ router.get('/online-count', requireAdmin, async (req,res) => {
 router.patch('/:driverId/approval', requireAdmin, async (req,res) => {
   try {
     const {driverId}=req.params, status=String(req.body?.status||'').toLowerCase();
-    if(!['approved','rejected'].includes(status)) return res.status(400).json({error:'Status deve ser approved ou rejected.'});
+    if(!['pending','approved','rejected'].includes(status)) return res.status(400).json({error:'Status deve ser pending, approved ou rejected.'});
     const userRef=db.ref(`users/${driverId}`), applicationRef=db.ref(`driverApplications/${driverId}`);
     const [userSnapshot,applicationSnapshot]=await Promise.all([userRef.get(),applicationRef.get()]);
     if(!userSnapshot.exists() || userSnapshot.val()?.userType!=='driver') return res.status(404).json({error:'Motorista não encontrado.'});
     const user = userSnapshot.val() || {};
     const existingApplication = applicationSnapshot.exists() ? applicationSnapshot.val() : applicationFromUser(driverId, user);
     const now=new Date().toISOString();
-    const updatedApplication = { ...existingApplication, uid: driverId, status, reviewedAt:now, reviewedBy:req.user.uid, recoveredFromUser: !applicationSnapshot.exists() };
-    await Promise.all([
-      userRef.update({driverApprovalStatus:status,driverApprovedAt:status==='approved'?now:null,driverApprovedBy:req.user.uid,isOnline:false, driverApplication: updatedApplication}),
-      applicationRef.set(updatedApplication)
-    ]);
-    return res.json({success:true,driverId,status});
+    const approved=status==='approved';
+    const updatedApplication={...existingApplication,uid:driverId,status,reviewedAt:status==='pending'?null:now,reviewedBy:status==='pending'?null:req.user.uid,recoveredFromUser:!applicationSnapshot.exists()};
+    const userUpdate={driverApprovalStatus:status,isOnline:false,driverApprovedAt:approved?now:null,driverApprovedBy:approved?req.user.uid:null,driverApplication:updatedApplication};
+    await Promise.all([userRef.update(userUpdate),applicationRef.set(updatedApplication)]);
+    return res.json({success:true,driverId,status,application:updatedApplication});
   } catch(error){ console.error('Erro ao revisar cadastro:',error); return res.status(500).json({error:'Erro ao atualizar aprovação do motorista.'}); }
 });
 
