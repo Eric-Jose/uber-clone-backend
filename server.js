@@ -156,7 +156,7 @@ io.on('connection', (socket) => {
   socket.on('end-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId`).once('value');
+      const snap = await db.ref(`rides/${data.rideId}`).once('value');
       const ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
       io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId });
