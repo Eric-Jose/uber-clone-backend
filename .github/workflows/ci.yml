@@ -45,6 +45,11 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Verify JavaScript syntax
+        run: |
+          set -e
+          find . -type f -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
+
       - name: Verify Firebase data safety
         run: npm run check:data-safety
 
