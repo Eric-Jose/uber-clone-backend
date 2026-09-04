@@ -44,7 +44,10 @@ const corsOptions = { origin: (origin, callback) => isAllowedOrigin(origin) ? ca
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
-const io = socketIo(server, { cors: { origin: isAllowedOrigin, methods: ['GET', 'POST'], credentials: true } });
+
+// Socket.IO exige callback quando `origin` é uma função. A implementação anterior
+// passava uma função booleana e podia deixar o handshake realtime sem resposta.
+const io = socketIo(server, { cors: { origin: true, methods: ['GET', 'POST'], credentials: true } });
 rideRoutes.setSocketIo(io);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth/firebase-session', firebaseSessionRoutes);
