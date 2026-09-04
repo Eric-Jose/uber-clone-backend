@@ -89,6 +89,7 @@ async function dispatchRide(ride) {
       io.to(`driver_${driver.uid}`).emit('new-ride-request', {
         ...current,
         rideId: ride.id,
+        passengerLocation: current.passengerLocation || current.origin?.location || null,
         estimatedDistanceKm: Number(driver.distance.toFixed(2)),
         source: 'backend-dispatch'
       });
@@ -99,14 +100,13 @@ async function dispatchRide(ride) {
       if (!after || after.status !== 'SEARCHING' || after.driverId) break;
     }
 
-    // Fallback para motoristas online que estejam conectados, mas por alguma
-    // razão ainda não tenham entrado na sala individual.
     if (sent === 0 && drivers.length > 0) {
       const current = (await db.ref(`rides/${ride.id}`).get()).val();
       if (current?.status === 'SEARCHING' && !current.driverId) {
         io.to('available_drivers').emit('new-ride-request', {
           ...current,
           rideId: ride.id,
+          passengerLocation: current.passengerLocation || current.origin?.location || null,
           source: 'available-drivers-fallback'
         });
         sent = 1;
@@ -129,15 +129,11 @@ router.post('/request', async (req, res) => {
     const uid = req.user.uid;
     step = 'validate-payload';
 
-    if (!origin || !destination) {
-      return res.status(400).json({ error: 'Origem e destino são obrigatórios.' });
-    }
+    if (!origin || !destination) return res.status(400).json({ error: 'Origem e destino são obrigatórios.' });
 
     const originLocation = normalizeLocation(origin);
     const destinationLocation = normalizeLocation(destination);
-    if (!originLocation || !destinationLocation) {
-      return res.status(400).json({ error: 'A localização de origem e destino é inválida.' });
-    }
+    if (!originLocation || !destinationLocation) return res.status(400).json({ error: 'A localização de origem e destino é inválida.' });
 
     step = 'load-user';
     const userSnapshot = await db.ref(`users/${uid}`).get();
@@ -152,14 +148,9 @@ router.post('/request', async (req, res) => {
       const ride = child.val();
       if (ride && ride.userId === uid && ACTIVE_STATUSES.includes(ride.status)) activeRide = ride;
     });
-    if (activeRide) {
-      return res.status(409).json({ error: 'Você já possui uma corrida em andamento.', ride: activeRide });
-    }
+    if (activeRide) return res.status(409).json({ error: 'Você já possui uma corrida em andamento.', ride: activeRide });
 
-    const distanceKmValue = Math.min(
-      Math.max(Math.round(haversine(originLocation, destinationLocation) * 100) / 100, 0),
-      300
-    );
+    const distanceKmValue = Math.min(Math.max(Math.round(haversine(originLocation, destinationLocation) * 100) / 100, 0), 300);
     if (distanceKmValue <= 0) return res.status(400).json({ error: 'A origem e o destino precisam ser diferentes.' });
 
     const safePrice = Number((distanceKmValue * 5 + 10).toFixed(2));
@@ -180,6 +171,7 @@ router.post('/request', async (req, res) => {
         address: String(destination.address || destination.display_name || 'Destino').slice(0, 240),
         location: destinationLocation
       },
+      passengerLocation: originLocation,
       price: safePrice,
       distance: distanceKmValue,
       status: 'SEARCHING',
@@ -191,17 +183,8 @@ router.post('/request', async (req, res) => {
 
     return res.status(201).json({ success: true, ride });
   } catch (error) {
-    console.error('Erro ao solicitar corrida:', {
-      step,
-      message: error?.message,
-      code: error?.code
-    });
-    return res.status(500).json({
-      error: 'Erro interno ao criar corrida.',
-      step,
-      code: error?.code || 'UNKNOWN',
-      details: error?.message || 'Erro desconhecido'
-    });
+    console.error('Erro ao solicitar corrida:', { step, message: error?.message, code: error?.code });
+    return res.status(500).json({ error: 'Erro interno ao criar corrida.', step, code: error?.code || 'UNKNOWN', details: error?.message || 'Erro desconhecido' });
   }
 });
 
@@ -210,18 +193,38 @@ router.post('/:rideId/search', async (req, res) => {
     const rideId = req.params.rideId;
     const snapshot = await db.ref(`rides/${rideId}`).get();
     const ride = snapshot.val();
-
     if (!ride) return res.status(404).json({ error: 'Corrida não encontrada.' });
     if (ride.userId !== req.user.uid) return res.status(403).json({ error: 'Acesso negado.' });
-    if (ride.status !== 'SEARCHING') {
-      return res.status(409).json({ error: 'Esta corrida não está mais procurando motorista.', ride });
-    }
-
+    if (ride.status !== 'SEARCHING') return res.status(409).json({ error: 'Esta corrida não está mais procurando motorista.', ride });
     setImmediate(() => dispatchRide(ride));
     return res.status(202).json({ success: true, ride, status: 'SEARCHING' });
   } catch (error) {
     console.error('Erro ao reiniciar busca de motorista:', error.message);
     return res.status(500).json({ error: 'Não foi possível reiniciar a busca de motorista.' });
+  }
+});
+
+router.post('/:rideId/passenger-location', async (req, res) => {
+  try {
+    const rideId = req.params.rideId;
+    const location = normalizeLocation(req.body?.location || req.body);
+    if (!location) return res.status(400).json({ error: 'Localização inválida.' });
+    const ref = db.ref(`rides/${rideId}`);
+    const ride = (await ref.get()).val();
+    if (!ride) return res.status(404).json({ error: 'Corrida não encontrada.' });
+    if (ride.userId !== req.user.uid) return res.status(403).json({ error: 'Acesso negado.' });
+    if (!ACTIVE_STATUSES.includes(ride.status)) return res.status(409).json({ error: 'A corrida não está ativa.' });
+
+    await ref.update({ passengerLocation: location, 'origin/location': location, updatedAt: admin.database.ServerValue.TIMESTAMP });
+    const updated = (await ref.get()).val();
+    if (updated.driverId && io) {
+      io.to(`driver_${updated.driverId}`).emit('passenger-location-update', { rideId, passengerId: req.user.uid, location });
+      emitToRide(rideId, 'passenger-location-update', { rideId, passengerId: req.user.uid, location });
+    }
+    return res.json({ success: true, location });
+  } catch (error) {
+    console.error('Erro ao atualizar localização do passageiro:', error.message);
+    return res.status(500).json({ error: 'Não foi possível atualizar a localização do passageiro.' });
   }
 });
 
@@ -267,6 +270,7 @@ router.post('/accept', async (req, res) => {
       value.driverName = driver.name || driver.email || 'Motorista';
       value.driverProfilePhoto = driver.profilePhoto || null;
       value.driverLocation = driver.currentLocation || null;
+      value.passengerLocation = value.passengerLocation || value.origin?.location || null;
       value.status = 'ACCEPTED';
       value.acceptedAt = admin.database.ServerValue.TIMESTAMP;
       return value;
@@ -299,16 +303,8 @@ async function updateRideStatus(req, res) {
     const uid = req.user.uid;
     if (ride.userId !== uid && ride.driverId !== uid) return res.status(403).json({ error: 'Você não pertence a esta corrida.' });
 
-    const transitions = {
-      SEARCHING: ['CANCELLED'],
-      ACCEPTED: ['IN_PROGRESS', 'CANCELLED'],
-      IN_PROGRESS: ['COMPLETED', 'CANCELLED'],
-      COMPLETED: [],
-      CANCELLED: []
-    };
-    if (!transitions[ride.status]?.includes(status)) {
-      return res.status(409).json({ error: `Não é possível mudar de ${ride.status} para ${status}.` });
-    }
+    const transitions = { SEARCHING: ['CANCELLED'], ACCEPTED: ['IN_PROGRESS', 'CANCELLED'], IN_PROGRESS: ['COMPLETED', 'CANCELLED'], COMPLETED: [], CANCELLED: [] };
+    if (!transitions[ride.status]?.includes(status)) return res.status(409).json({ error: `Não é possível mudar de ${ride.status} para ${status}.` });
 
     const passengerCancel = status === 'CANCELLED' && ride.userId === uid;
     const driverChange = ride.driverId === uid && ['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(status);
@@ -326,13 +322,7 @@ async function updateRideStatus(req, res) {
     const payload = { rideId: id, ride: updated };
     if (status === 'IN_PROGRESS') emitToRide(id, 'ride-started', payload);
     if (status === 'COMPLETED') emitToRide(id, 'ride-ended', payload);
-    if (status === 'CANCELLED') {
-      emitToRide(id, 'ride-cancelled', {
-        ...payload,
-        cancelledBy: uid,
-        cancellationReason: updated?.cancellationReason || null
-      });
-    }
+    if (status === 'CANCELLED') emitToRide(id, 'ride-cancelled', { ...payload, cancelledBy: uid, cancellationReason: updated?.cancellationReason || null });
 
     return res.json({ success: true, status, ride: updated });
   } catch (error) {
@@ -383,8 +373,7 @@ function haversine(a, b) {
   const lat2 = b.lat * Math.PI / 180;
   const dLat = lat2 - lat1;
   const dLon = (b.lng - a.lng) * Math.PI / 180;
-  const x = Math.sin(dLat / 2) ** 2
-    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
