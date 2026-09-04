@@ -9,6 +9,9 @@ const dispatchingRideIds = new Set();
 
 const VALID_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'];
 const ACTIVE_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS'];
+const DISPATCH_RADIUS_KM = Math.max(1, Number(process.env.DISPATCH_RADIUS_KM) || 25);
+const DISPATCH_RADIUS_EXTENDED_KM = Math.max(DISPATCH_RADIUS_KM, Number(process.env.DISPATCH_RADIUS_EXTENDED_KM) || 50);
+const DISPATCH_RADIUS_LONG_KM = Math.max(DISPATCH_RADIUS_EXTENDED_KM, Number(process.env.DISPATCH_RADIUS_LONG_KM) || 100);
 
 router.setSocketIo = (socketIo) => {
   io = socketIo;
@@ -45,7 +48,13 @@ function distanceKm(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
-async function findEligibleDrivers(origin) {
+function dispatchRadiusKm(ageMs) {
+  if (ageMs < 60 * 1000) return DISPATCH_RADIUS_KM;
+  if (ageMs < 5 * 60 * 1000) return DISPATCH_RADIUS_EXTENDED_KM;
+  return DISPATCH_RADIUS_LONG_KM;
+}
+
+async function findEligibleDrivers(origin, radiusKm = DISPATCH_RADIUS_KM) {
   const [usersSnapshot, locationsSnapshot] = await Promise.all([
     db.ref('users').get(),
     db.ref('locations').get()
@@ -63,7 +72,7 @@ async function findEligibleDrivers(origin) {
 
     const location = normalizeLocation(user.currentLocation || locations[uid]);
     const distance = distanceKm(originLocation, location);
-    if (Number.isFinite(distance)) drivers.push({ uid, distance });
+    if (Number.isFinite(distance) && distance <= radiusKm) drivers.push({ uid, distance });
   }
 
   return drivers.sort((a, b) => a.distance - b.distance);
@@ -75,7 +84,9 @@ async function dispatchRide(ride) {
 
   dispatchingRideIds.add(ride.id);
   try {
-    const drivers = await findEligibleDrivers(ride.origin);
+    const ageMs = Math.max(0, Date.now() - Number(ride.createdAt || Date.now()));
+    const radiusKm = dispatchRadiusKm(ageMs);
+    const drivers = await findEligibleDrivers(ride.origin, radiusKm);
     let sent = 0;
 
     for (const driver of drivers.slice(0, 10)) {
@@ -91,6 +102,7 @@ async function dispatchRide(ride) {
         rideId: ride.id,
         passengerLocation: current.passengerLocation || current.origin?.location || null,
         estimatedDistanceKm: Number(driver.distance.toFixed(2)),
+        dispatchRadiusKm: radiusKm,
         source: 'backend-dispatch'
       });
       sent += 1;
@@ -100,20 +112,7 @@ async function dispatchRide(ride) {
       if (!after || after.status !== 'SEARCHING' || after.driverId) break;
     }
 
-    if (sent === 0 && drivers.length > 0) {
-      const current = (await db.ref(`rides/${ride.id}`).get()).val();
-      if (current?.status === 'SEARCHING' && !current.driverId) {
-        io.to('available_drivers').emit('new-ride-request', {
-          ...current,
-          rideId: ride.id,
-          passengerLocation: current.passengerLocation || current.origin?.location || null,
-          source: 'available-drivers-fallback'
-        });
-        sent = 1;
-      }
-    }
-
-    return { sent, eligible: drivers.length };
+    return { sent, eligible: drivers.length, radiusKm };
   } catch (error) {
     console.error('Erro no despacho automático da corrida:', error.message);
     return { sent: 0, eligible: 0, error: error.message };
@@ -255,6 +254,21 @@ router.post('/accept', async (req, res) => {
     if (driver.driverApprovalStatus !== 'approved') return res.status(403).json({ error: 'Motorista ainda não foi aprovado.' });
     if (!driver.isOnline) return res.status(409).json({ error: 'Motorista está offline.' });
 
+    const ref = db.ref(`rides/${rideId}`);
+    const currentRide = (await ref.get()).val();
+    if (!currentRide || currentRide.status !== 'SEARCHING' || currentRide.driverId) return res.status(409).json({ error: 'Corrida já foi aceita ou não existe.' });
+
+    const originLocation = normalizeLocation(currentRide.origin);
+    const driverLocation = normalizeLocation(driver.currentLocation);
+    if (!originLocation || !driverLocation) return res.status(409).json({ error: 'Localização do motorista ou embarque indisponível.' });
+
+    const ageMs = Math.max(0, Date.now() - Number(currentRide.createdAt || Date.now()));
+    const radiusKm = dispatchRadiusKm(ageMs);
+    const pickupDistanceKm = distanceKm(driverLocation, originLocation);
+    if (!Number.isFinite(pickupDistanceKm) || pickupDistanceKm > radiusKm) {
+      return res.status(409).json({ error: `Você está fora da área de atendimento desta corrida (${radiusKm} km).`, estimatedDistanceKm: Number.isFinite(pickupDistanceKm) ? Number(pickupDistanceKm.toFixed(2)) : null, dispatchRadiusKm: radiusKm });
+    }
+
     const activeByDriver = await db.ref('rides').orderByChild('driverId').equalTo(driverId).get();
     let activeRide = null;
     activeByDriver.forEach((child) => {
@@ -263,7 +277,6 @@ router.post('/accept', async (req, res) => {
     });
     if (activeRide) return res.status(409).json({ error: 'Você já possui uma corrida em andamento.', ride: activeRide });
 
-    const ref = db.ref(`rides/${rideId}`);
     const result = await ref.transaction((value) => {
       if (!value || value.status !== 'SEARCHING' || value.driverId) return;
       value.driverId = driverId;
