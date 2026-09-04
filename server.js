@@ -164,17 +164,18 @@ io.on('connection', async (socket) => {
       const rideRef = db.ref(`rides/${data.rideId}`), snap = await rideRef.once('value'), ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
       const nearestDrivers = await findNearestDrivers(ride.origin), request = { rideId: data.rideId, passengerId: socket.user.uid, passengerName: ride.passengerName || 'Passageiro', passengerProfilePhoto: ride.passengerProfilePhoto || null, origin: ride.origin, destination: ride.destination, passengerLocation: ride.passengerLocation || ride.origin?.location || null, price: ride.price, distance: ride.distance };
-      if (!nearestDrivers.length) { io.to('available_drivers').emit('new-ride-request', request); return; }
+      const eligibleDrivers = nearestDrivers.filter((driver) => driver.distance <= 25);
+      if (!eligibleDrivers.length) return;
       let offered = false;
-      for (const driver of nearestDrivers) {
+      for (const driver of eligibleDrivers.slice(0, 10)) {
         const current = (await rideRef.once('value')).val();
         if (!current || current.status !== 'SEARCHING' || current.driverId) break;
-        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)) }); offered = true;
+        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)), dispatchRadiusKm: 25, source: 'socket-dispatch' }); offered = true;
         await new Promise(resolve => setTimeout(resolve, 8000));
         const afterOffer = (await rideRef.once('value')).val();
         if (!afterOffer || afterOffer.status !== 'SEARCHING' || afterOffer.driverId) break;
       }
-      if (!offered) io.to('available_drivers').emit('new-ride-request', request);
+      if (!offered) return;
     } catch (error) { console.error('Erro ao encontrar motorista:', error.message); }
   });
 
