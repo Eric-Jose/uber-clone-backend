@@ -43,7 +43,7 @@ router.post('/accept', async (req, res) => {
     const ref = db.ref(`rides/${rideId}`);
     const currentRide = (await ref.get()).val();
     if (!currentRide || currentRide.status !== 'SEARCHING' || currentRide.driverId) return res.status(409).json({ error: 'Corrida já foi aceita ou não existe.', ride: currentRide || null });
-    const originLocation = normalizeLocation(currentRide.origin), driverLocation = normalizeLocation(driver.currentLocation);
+    const originLocation = normalizeLocation(currentRide.origin), driverLocation = normalizeLocation(driver.currentLocation || (await db.ref(`locations/${driverId}`).get()).val());
     if (!originLocation || !driverLocation) return res.status(409).json({ error: 'Localização do motorista ou embarque indisponível.' });
     const ageMs = Math.max(0, Date.now() - Number(currentRide.createdAt || Date.now())), radiusKm = dispatchRadiusKm(ageMs), pickupDistanceKm = distanceKm(driverLocation, originLocation);
     if (!Number.isFinite(pickupDistanceKm) || pickupDistanceKm > radiusKm) return res.status(409).json({ error: `Você está fora da área de atendimento desta corrida (${radiusKm} km).`, estimatedDistanceKm: Number.isFinite(pickupDistanceKm) ? Number(pickupDistanceKm.toFixed(2)) : null, dispatchRadiusKm: radiusKm });
@@ -54,8 +54,15 @@ router.post('/accept', async (req, res) => {
     const latestRide = (await ref.get()).val();
     if (!latestRide || latestRide.status !== 'SEARCHING' || latestRide.driverId) return res.status(409).json({ error: 'Corrida já foi aceita ou não existe.', ride: latestRide || null });
     const accepted = { ...latestRide, driverId, driverName: driver.name || driver.email || 'Motorista', driverProfilePhoto: driver.profilePhoto || null, driverLocation: driver.currentLocation || null, passengerLocation: latestRide.passengerLocation || latestRide.origin?.location || null, status: 'ACCEPTED', acceptedAt: admin.database.ServerValue.TIMESTAMP, updatedAt: admin.database.ServerValue.TIMESTAMP };
-    await ref.update(accepted);
-    const confirmed = (await ref.get()).val();
+    const transactionResult = await ref.transaction((value) => {
+      if (!value || value.status !== 'SEARCHING' || value.driverId) return;
+      return accepted;
+    });
+    if (!transactionResult.committed) {
+      const conflictRide = transactionResult.snapshot.val();
+      return res.status(409).json({ error: 'Corrida já foi aceita ou não existe.', ride: conflictRide || null });
+    }
+    const confirmed = transactionResult.snapshot.val();
     if (!confirmed || confirmed.status !== 'ACCEPTED' || String(confirmed.driverId) !== String(driverId)) return res.status(409).json({ error: 'Não foi possível confirmar a aceitação da corrida.', ride: confirmed || null });
     emitToRide(rideId, 'ride-accepted', { rideId, driverId, ride: confirmed });
     if (io) io.emit('ride-unavailable', { rideId, driverId, source: 'ride-accepted' });
@@ -79,7 +86,6 @@ async function updateRideStatus(req, res) {
     if (!allowedTransitions[ride.status]?.includes(status)) return res.status(409).json({ error: `Transição inválida: ${ride.status} → ${status}.` });
     if (status === 'IN_PROGRESS' && ride.driverId !== uid) return res.status(403).json({ error: 'Somente o motorista pode iniciar a corrida.' });
     if (status === 'COMPLETED' && ride.driverId !== uid) return res.status(403).json({ error: 'Somente o motorista pode finalizar a corrida.' });
-
     if (status === 'IN_PROGRESS' || status === 'COMPLETED') {
       const driver = (await db.ref(`users/${ride.driverId}`).get()).val();
       const driverLocation = normalizeLocation(driver?.currentLocation || (await db.ref(`locations/${ride.driverId}`).get()).val());
@@ -87,7 +93,6 @@ async function updateRideStatus(req, res) {
       const distanceToTarget = distanceKm(driverLocation, target);
       if (!Number.isFinite(distanceToTarget) || distanceToTarget > ARRIVAL_RADIUS_KM) return res.status(409).json({ error: status === 'IN_PROGRESS' ? `Aproxime-se do passageiro para iniciar a corrida. Distância atual: ${Number.isFinite(distanceToTarget) ? distanceToTarget.toFixed(2) : '?'} km.` : `Aproxime-se do destino para finalizar a corrida. Distância atual: ${Number.isFinite(distanceToTarget) ? distanceToTarget.toFixed(2) : '?'} km.` });
     }
-
     const now = admin.database.ServerValue.TIMESTAMP;
     const updates = { status, updatedAt: now };
     if (status === 'IN_PROGRESS') updates.startedAt = now;
