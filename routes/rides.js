@@ -13,7 +13,7 @@ const ACTIVE_STATUSES = ['SEARCHING', 'ACCEPTED', 'IN_PROGRESS'];
 const DISPATCH_RADIUS_KM = Math.max(1, Number(process.env.DISPATCH_RADIUS_KM) || 25);
 const DISPATCH_RADIUS_EXTENDED_KM = Math.max(DISPATCH_RADIUS_KM, Number(process.env.DISPATCH_RADIUS_EXTENDED_KM) || 50);
 const DISPATCH_RADIUS_LONG_KM = Math.max(DISPATCH_RADIUS_EXTENDED_KM, Number(process.env.DISPATCH_RADIUS_LONG_KM) || 100);
-const ARRIVAL_RADIUS_KM = 0.15;
+const ARRIVAL_RADIUS_KM = 0.5;
 
 router.setSocketIo = (socketIo) => { io = socketIo; };
 function emitToRide(id, event, payload) { if (io && id) io.to(`ride_${id}`).emit(event, payload); }
@@ -84,26 +84,24 @@ async function updateRideStatus(req, res) {
       const driverLocation = normalizeLocation(driver?.currentLocation || (await db.ref(`locations/${ride.driverId}`).get()).val());
       const target = status === 'IN_PROGRESS' ? normalizeLocation(ride.passengerLocation || ride.origin) : normalizeLocation(ride.destination);
       const distanceToTarget = distanceKm(driverLocation, target);
-      if (!Number.isFinite(distanceToTarget)) return res.status(409).json({ error: 'Não foi possível confirmar a localização GPS do motorista.' });
-      if (distanceToTarget > ARRIVAL_RADIUS_KM) return res.status(409).json({ error: status === 'IN_PROGRESS' ? `Chegue ao passageiro para iniciar a corrida. Distância atual: ${distanceToTarget.toFixed(2)} km.` : `Chegue ao destino para finalizar a corrida. Distância atual: ${distanceToTarget.toFixed(2)} km.` });
+      if (!Number.isFinite(distanceToTarget) || distanceToTarget > ARRIVAL_RADIUS_KM) return res.status(409).json({ error: status === 'IN_PROGRESS' ? `Aproxime-se do passageiro para iniciar a corrida. Distância atual: ${Number.isFinite(distanceToTarget) ? distanceToTarget.toFixed(2) : '?'} km.` : `Aproxime-se do destino para finalizar a corrida. Distância atual: ${Number.isFinite(distanceToTarget) ? distanceToTarget.toFixed(2) : '?'} km.` });
     }
 
-    const update = { status, updatedAt: admin.database.ServerValue.TIMESTAMP };
-    if (status === 'CANCELLED') { update.cancelledBy = uid; if (cancellationReason) update.cancellationReason = String(cancellationReason).slice(0, 200); }
-    await ref.update(update);
-    const updated = (await ref.get()).val(), payload = { rideId: id, ride: updated };
-    if (status === 'IN_PROGRESS') emitToRide(id, 'ride-started', payload);
-    if (status === 'COMPLETED') emitToRide(id, 'ride-ended', payload);
-    if (status === 'CANCELLED') {
-      const cancellationPayload = { ...payload, cancelledBy: uid, cancellationReason: updated?.cancellationReason || null };
-      emitToRide(id, 'ride-cancelled', cancellationPayload);
-      if (io && updated?.driverId && String(updated.driverId) !== String(uid)) io.to(`driver_${updated.driverId}`).emit('ride-cancelled', cancellationPayload);
-      if (io && updated?.userId && String(updated.userId) !== String(uid)) io.to(`passenger_${updated.userId}`).emit('ride-cancelled', cancellationPayload);
+    const now = admin.database.ServerValue.TIMESTAMP;
+    const updates = { status, updatedAt: now };
+    if (status === 'IN_PROGRESS') updates.startedAt = now;
+    if (status === 'COMPLETED') updates.completedAt = now;
+    if (status === 'CANCELLED') { updates.cancelledAt = now; updates.cancelledBy = uid; updates.cancellationReason = String(cancellationReason || 'Cancelada').slice(0, 240); }
+    await ref.update(updates);
+    const updated = (await ref.get()).val();
+    emitToRide(id, status === 'IN_PROGRESS' ? 'ride-started' : status === 'COMPLETED' ? 'ride-ended' : status === 'CANCELLED' ? 'ride-cancelled' : 'ride-status', { rideId: id, ride: updated, cancelledBy: updated.cancelledBy || null, cancellationReason: updated.cancellationReason || null });
+    if (status === 'CANCELLED' && io) {
+      if (updated.driverId && String(updated.driverId) !== String(uid)) io.to(`driver_${updated.driverId}`).emit('ride-cancelled', { rideId: id, ride: updated, cancelledBy: uid, cancellationReason: updated.cancellationReason || null });
+      if (updated.userId && String(updated.userId) !== String(uid)) io.to(`passenger_${updated.userId}`).emit('ride-cancelled', { rideId: id, ride: updated, cancelledBy: uid, cancellationReason: updated.cancellationReason || null });
     }
-    return res.json({ success: true, status, ride: updated });
-  } catch (error) { console.error('Erro ao atualizar status:', error); return res.status(500).json({ error: 'Erro ao atualizar status da corrida.' }); }
+    return res.json({ success: true, ride: updated });
+  } catch (error) { console.error('Erro ao atualizar status da corrida:', error); return res.status(500).json({ error: 'Não foi possível atualizar a corrida.', details: error.message }); }
 }
-router.patch('/:rideId/status', updateRideStatus); router.patch('/status', updateRideStatus);
-router.get('/history', async (req, res) => { try { const uid = req.user.uid; const parsedLimit = Number.parseInt(req.query.limit, 10); const limit = Number.isInteger(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 30; const userSnapshot = await db.ref(`users/${uid}`).get(), user = userSnapshot.val(); if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' }); const snapshot = await db.ref('rides').get(); const rides = []; snapshot.forEach((child) => { const ride = child.val(); if (!ride) return; const matches = user.userType === 'driver' ? String(ride.driverId || '') === String(uid) : String(ride.userId || '') === String(uid); if (matches) rides.push(ride); }); rides.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)); return res.json({ success: true, rides: rides.slice(0, limit) }); } catch (error) { console.error('Erro ao listar histórico:', error.message); return res.status(500).json({ error: 'Erro ao buscar histórico de corridas.' }); } });
-router.get('/:rideId', async (req, res) => { try { const ride = (await db.ref(`rides/${req.params.rideId}`).get()).val(); if (!ride) return res.status(404).json({ error: 'Corrida não encontrada.' }); const uid = req.user.uid; if (ride.userId !== uid && ride.driverId !== uid) return res.status(403).json({ error: 'Acesso negado.' }); return res.json({ success: true, ride }); } catch (error) { return res.status(500).json({ error: 'Erro ao buscar corrida.' }); } });
+
+router.patch('/:rideId/status', updateRideStatus);
 module.exports = router;
