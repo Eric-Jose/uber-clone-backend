@@ -51,9 +51,6 @@ app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides/pending', pendingRideRoutes);
 
-// Compatibilidade explícita para clientes que usam o histórico no painel.
-// Esta rota fica antes do router de corridas e evita regressões caso a rota
-// seja removida em alguma versão do módulo principal de rides.
 app.get('/api/rides/history', authenticate, async (req, res) => {
   try {
     const uid = req.user.uid;
@@ -79,9 +76,9 @@ app.get('/api/rides/history', authenticate, async (req, res) => {
   }
 });
 
-// Consulta autenticada de uma corrida específica, mantida fora do router
-// principal para preservar compatibilidade com versões anteriores do frontend.
-app.get('/api/rides/:rideId', authenticate, async (req, res) => {
+// Firebase push IDs são alfanuméricos com 10+ caracteres; isso evita que
+// endpoints estáticos como /active sejam capturados por esta rota dinâmica.
+app.get('/api/rides/:rideId([A-Za-z0-9_-]{10,})', authenticate, async (req, res) => {
   try {
     const ride = (await db.ref(`rides/${req.params.rideId}`).get()).val();
     if (!ride) return res.status(404).json({ error: 'Corrida não encontrada.' });
@@ -98,7 +95,6 @@ app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/admin-stats', adminStatsRoutes);
 
-// Railway healthcheck uses /health; keep /api/health for compatibility with existing clients.
 const healthHandler = (req, res) => res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 app.get('/health', healthHandler);
 app.get('/api/health', healthHandler);
@@ -148,7 +144,7 @@ io.on('connection', async (socket) => {
   socket.on('join-ride-room', async (rideId) => {
     if (!rideId) return;
     try {
-      const snap = await db.ref(`rides/${rideId}`).once('value'), ride = snap.val(), uid = socket.user.uid;
+      const snap = await db.ref(`rides/${rideId}`).get(), ride = snap.val(), uid = socket.user.uid;
       if (!ride || (ride.userId !== uid && ride.driverId !== uid)) return;
       socket.join(`ride_${rideId}`);
     } catch (error) { console.error('Erro ao entrar na corrida:', error.message); }
@@ -159,7 +155,7 @@ io.on('connection', async (socket) => {
     if (socket.driverReady || socket.driverRoomLoading) return;
     socket.driverRoomLoading = true;
     try {
-      const snap = await db.ref(`users/${socket.user.uid}`).once('value'), driver = snap.val();
+      const snap = await db.ref(`users/${socket.user.uid}`).get(), driver = snap.val();
       const approvedOnline = driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true;
       if (approvedOnline) {
         socket.join('available_drivers');
@@ -180,7 +176,7 @@ io.on('connection', async (socket) => {
     const { rideId } = data, latitude = Number(data.latitude ?? data.lat), longitude = Number(data.longitude ?? data.lng), driverId = socket.user.uid;
     if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
     try {
-      const snap = await db.ref(`rides/${rideId}`).once('value'), ride = snap.val();
+      const snap = await db.ref(`rides/${rideId}`).get(), ride = snap.val();
       if (!ride || ride.driverId !== driverId || !['ACCEPTED', 'IN_PROGRESS'].includes(ride.status)) return;
       const location = await saveDriverLocation(driverId, latitude, longitude);
       io.to(`ride_${rideId}`).emit('update-driver-location', { driverId, ...location });
@@ -192,7 +188,7 @@ io.on('connection', async (socket) => {
     const latitude = Number(data.latitude ?? data.lat), longitude = Number(data.longitude ?? data.lng);
     if (!rideId || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
     try {
-      const ref = db.ref(`rides/${rideId}`), snap = await ref.once('value'), ride = snap.val();
+      const ref = db.ref(`rides/${rideId}`), snap = await ref.get(), ride = snap.val();
       if (!ride || ride.userId !== passengerId || !['SEARCHING', 'ACCEPTED', 'IN_PROGRESS'].includes(ride.status)) return;
       const location = { lat: latitude, lng: longitude, timestamp: Date.now() };
       await ref.update({ passengerLocation: location, 'origin/location': { lat: latitude, lng: longitude } });
@@ -204,18 +200,18 @@ io.on('connection', async (socket) => {
   socket.on('request-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const rideRef = db.ref(`rides/${data.rideId}`), snap = await rideRef.once('value'), ride = snap.val();
+      const rideRef = db.ref(`rides/${data.rideId}`), snap = await rideRef.get(), ride = snap.val();
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
       const nearestDrivers = await findNearestDrivers(ride.origin), request = { rideId: data.rideId, passengerId: socket.user.uid, passengerName: ride.passengerName || 'Passageiro', passengerProfilePhoto: ride.passengerProfilePhoto || null, origin: ride.origin, destination: ride.destination, passengerLocation: ride.passengerLocation || ride.origin?.location || null, price: ride.price, distance: ride.distance };
       const eligibleDrivers = nearestDrivers.filter((driver) => driver.distance <= 25);
       let offered = false;
       for (const driver of eligibleDrivers.slice(0, 10)) {
-        const current = (await rideRef.once('value')).val();
+        const current = (await rideRef.get()).val();
         if (!current || current.status !== 'SEARCHING' || current.driverId) break;
         io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)), dispatchRadiusKm: 25, source: 'socket-dispatch' });
         offered = true;
         await new Promise(resolve => setTimeout(resolve, 8000));
-        const afterOffer = (await rideRef.once('value')).val();
+        const afterOffer = (await rideRef.get()).val();
         if (!afterOffer || afterOffer.status !== 'SEARCHING' || afterOffer.driverId) break;
       }
       if (!offered) console.log('Nenhum motorista elegível recebeu a oferta da corrida:', data.rideId);
@@ -225,7 +221,7 @@ io.on('connection', async (socket) => {
   socket.on('accept-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value'), ride = snap.val();
+      const snap = await db.ref(`rides/${data.rideId}`).get(), ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'ACCEPTED') return;
       socket.join(`ride_${data.rideId}`);
       io.to(`ride_${data.rideId}`).emit('ride-accepted', { rideId: data.rideId, driverId: socket.user.uid, ride });
@@ -234,7 +230,7 @@ io.on('connection', async (socket) => {
   socket.on('ride-cancelled', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value'), ride = snap.val(), uid = socket.user.uid;
+      const snap = await db.ref(`rides/${data.rideId}`).get(), ride = snap.val(), uid = socket.user.uid;
       if (!ride || (ride.userId !== uid && ride.driverId !== uid) || ride.status !== 'CANCELLED') return;
       io.to(`ride_${data.rideId}`).emit('ride-cancelled', { rideId: data.rideId, cancelledBy: ride.cancelledBy || uid, cancellationReason: ride.cancellationReason || null });
     } catch (error) { console.error('Erro ao notificar cancelamento:', error.message); }
@@ -242,7 +238,7 @@ io.on('connection', async (socket) => {
   socket.on('start-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value'), ride = snap.val();
+      const snap = await db.ref(`rides/${data.rideId}`).get(), ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'IN_PROGRESS') return;
       io.to(`ride_${data.rideId}`).emit('ride-started', { rideId: data.rideId, ride });
     } catch (error) { console.error('Erro ao iniciar corrida:', error.message); }
@@ -250,7 +246,7 @@ io.on('connection', async (socket) => {
   socket.on('end-ride', async (data = {}) => {
     if (!data.rideId) return;
     try {
-      const snap = await db.ref(`rides/${data.rideId}`).once('value'), ride = snap.val();
+      const snap = await db.ref(`rides/${data.rideId}`).get(), ride = snap.val();
       if (!ride || ride.driverId !== socket.user.uid || ride.status !== 'COMPLETED') return;
       io.to(`ride_${data.rideId}`).emit('ride-ended', { rideId: data.rideId, ride });
     } catch (error) { console.error('Erro ao finalizar corrida:', error.message); }
