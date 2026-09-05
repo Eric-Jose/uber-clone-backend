@@ -79,6 +79,20 @@ app.get('/api/rides/history', authenticate, async (req, res) => {
   }
 });
 
+// Consulta autenticada de uma corrida específica, mantida fora do router
+// principal para preservar compatibilidade com versões anteriores do frontend.
+app.get('/api/rides/:rideId', authenticate, async (req, res) => {
+  try {
+    const ride = (await db.ref(`rides/${req.params.rideId}`).get()).val();
+    if (!ride) return res.status(404).json({ error: 'Corrida não encontrada.' });
+    if (ride.userId !== req.user.uid && ride.driverId !== req.user.uid) return res.status(403).json({ error: 'Acesso negado.' });
+    return res.json({ success: true, ride });
+  } catch (error) {
+    console.error('Erro ao buscar corrida:', error.message);
+    return res.status(500).json({ error: 'Erro interno ao buscar corrida.' });
+  }
+});
+
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
