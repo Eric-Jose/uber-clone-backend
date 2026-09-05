@@ -10,10 +10,7 @@ dotenv.config();
 
 const requiredFirebaseEnv = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_DATABASE_URL'];
 const missingFirebaseEnv = requiredFirebaseEnv.filter((key) => !process.env[key]);
-if (missingFirebaseEnv.length) {
-  console.error(`Configuração Firebase incompleta. Variáveis ausentes: ${missingFirebaseEnv.join(', ')}`);
-  throw new Error('Firebase Admin não pode ser inicializado: variáveis de ambiente obrigatórias ausentes.');
-}
+if (missingFirebaseEnv.length) throw new Error(`Firebase Admin não pode ser inicializado: variáveis ausentes: ${missingFirebaseEnv.join(', ')}`);
 
 if (!admin.apps.length) {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
@@ -56,7 +53,11 @@ app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/admin-stats', adminStatsRoutes);
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// Railway healthcheck uses /health; keep /api/health for compatibility with existing clients.
+const healthHandler = (req, res) => res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+app.get('/health', healthHandler);
+app.get('/api/health', healthHandler);
 app.use((error, req, res, next) => { console.error('Erro não tratado na API:', error?.stack || error); if (res.headersSent) return next(error); return res.status(500).json({ error: 'Erro interno do servidor.' }); });
 
 io.use((socket, next) => {
@@ -97,8 +98,6 @@ async function saveDriverLocation(driverId, latitude, longitude) {
 
 io.on('connection', async (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
-  // Não fazemos leitura de users/{uid} automaticamente ao conectar. O cliente
-  // entra na sala de motoristas explicitamente quando realmente está online.
   socket.driverReady = false;
   socket.driverRoomLoading = false;
 
@@ -130,9 +129,7 @@ io.on('connection', async (socket) => {
   socket.on('driver-presence-location', async (data = {}) => {
     const latitude = Number(data.latitude ?? data.lat), longitude = Number(data.longitude ?? data.lng), driverId = socket.user.uid;
     if (!socket.driverReady || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
-    try {
-      await saveDriverLocation(driverId, latitude, longitude);
-    } catch (error) { console.error('Erro na localização do motorista online:', error.message); }
+    try { await saveDriverLocation(driverId, latitude, longitude); } catch (error) { console.error('Erro na localização do motorista online:', error.message); }
   });
 
   socket.on('driver-location', async (data = {}) => {
@@ -167,17 +164,17 @@ io.on('connection', async (socket) => {
       if (!ride || ride.userId !== socket.user.uid || ride.status !== 'SEARCHING') return;
       const nearestDrivers = await findNearestDrivers(ride.origin), request = { rideId: data.rideId, passengerId: socket.user.uid, passengerName: ride.passengerName || 'Passageiro', passengerProfilePhoto: ride.passengerProfilePhoto || null, origin: ride.origin, destination: ride.destination, passengerLocation: ride.passengerLocation || ride.origin?.location || null, price: ride.price, distance: ride.distance };
       const eligibleDrivers = nearestDrivers.filter((driver) => driver.distance <= 25);
-      if (!eligibleDrivers.length) return;
       let offered = false;
       for (const driver of eligibleDrivers.slice(0, 10)) {
         const current = (await rideRef.once('value')).val();
         if (!current || current.status !== 'SEARCHING' || current.driverId) break;
-        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)), dispatchRadiusKm: 25, source: 'socket-dispatch' }); offered = true;
+        io.to(`driver_${driver.uid}`).emit('new-ride-request', { ...request, estimatedDistanceKm: Number(driver.distance.toFixed(2)), dispatchRadiusKm: 25, source: 'socket-dispatch' });
+        offered = true;
         await new Promise(resolve => setTimeout(resolve, 8000));
         const afterOffer = (await rideRef.once('value')).val();
         if (!afterOffer || afterOffer.status !== 'SEARCHING' || afterOffer.driverId) break;
       }
-      if (!offered) return;
+      if (!offered) console.log('Nenhum motorista elegível recebeu a oferta da corrida:', data.rideId);
     } catch (error) { console.error('Erro ao encontrar motorista:', error.message); }
   });
 
