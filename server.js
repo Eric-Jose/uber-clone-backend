@@ -5,6 +5,7 @@ const admin = require('firebase-admin');
 const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
+const { authenticate } = require('./middleware/auth');
 
 dotenv.config();
 
@@ -49,6 +50,35 @@ app.use('/api/auth/firebase-session', firebaseSessionRoutes);
 app.use('/api/auth/password-reset', passwordResetRoutes);
 app.use('/api/drivers', driverRoutes);
 app.use('/api/rides/pending', pendingRideRoutes);
+
+// Compatibilidade explícita para clientes que usam o histórico no painel.
+// Esta rota fica antes do router de corridas e evita regressões caso a rota
+// seja removida em alguma versão do módulo principal de rides.
+app.get('/api/rides/history', authenticate, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const parsedLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isInteger(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 30;
+    const user = (await db.ref(`users/${uid}`).get()).val();
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    const snapshot = await db.ref('rides').get();
+    const rides = [];
+    snapshot.forEach((child) => {
+      const ride = child.val();
+      if (!ride) return;
+      const matches = user.userType === 'driver'
+        ? String(ride.driverId || '') === String(uid)
+        : String(ride.userId || '') === String(uid);
+      if (matches) rides.push(ride);
+    });
+    rides.sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+    return res.json({ success: true, rides: rides.slice(0, limit) });
+  } catch (error) {
+    console.error('Erro ao buscar histórico de corridas:', error.message);
+    return res.status(500).json({ error: 'Erro ao buscar histórico de corridas.' });
+  }
+});
+
 app.use('/api/rides', rideRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/ratings', ratingRoutes);
