@@ -45,8 +45,6 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
-// Socket.IO exige callback quando `origin` é uma função. A implementação anterior
-// passava uma função booleana e podia deixar o handshake realtime sem resposta.
 const io = socketIo(server, { cors: { origin: true, methods: ['GET', 'POST'], credentials: true } });
 rideRoutes.setSocketIo(io);
 app.use('/api/auth', authRoutes);
@@ -99,14 +97,10 @@ async function saveDriverLocation(driverId, latitude, longitude) {
 
 io.on('connection', async (socket) => {
   console.log('Cliente Socket.IO conectado:', socket.id, socket.user?.uid);
-  try {
-    const userSnapshot = await db.ref(`users/${socket.user.uid}`).once('value');
-    const connectedUser = userSnapshot.val();
-    if (connectedUser?.userType === 'driver' && connectedUser?.driverApprovalStatus === 'approved' && connectedUser?.isOnline === true) {
-      socket.join('available_drivers');
-      socket.join(`driver_${socket.user.uid}`);
-    }
-  } catch (error) { console.error('Erro ao inscrever motorista automaticamente:', error.message); }
+  // Não fazemos leitura de users/{uid} automaticamente ao conectar. O cliente
+  // entra na sala de motoristas explicitamente quando realmente está online.
+  socket.driverReady = false;
+  socket.driverRoomLoading = false;
 
   socket.on('join-ride-room', async (rideId) => {
     if (!rideId) return;
@@ -117,21 +111,26 @@ io.on('connection', async (socket) => {
     } catch (error) { console.error('Erro ao entrar na corrida:', error.message); }
   });
   socket.on('leave-ride-room', (rideId) => { if (rideId) socket.leave(`ride_${rideId}`); });
+
   socket.on('join-drivers-room', async () => {
+    if (socket.driverReady || socket.driverRoomLoading) return;
+    socket.driverRoomLoading = true;
     try {
       const snap = await db.ref(`users/${socket.user.uid}`).once('value'), driver = snap.val();
-      if (driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true) {
-        socket.join('available_drivers'); socket.join(`driver_${socket.user.uid}`);
+      const approvedOnline = driver?.userType === 'driver' && driver?.driverApprovalStatus === 'approved' && driver?.isOnline === true;
+      if (approvedOnline) {
+        socket.join('available_drivers');
+        socket.join(`driver_${socket.user.uid}`);
+        socket.driverReady = true;
       }
     } catch (error) { console.error('Erro ao entrar na sala de motoristas:', error.message); }
+    finally { socket.driverRoomLoading = false; }
   });
 
   socket.on('driver-presence-location', async (data = {}) => {
     const latitude = Number(data.latitude ?? data.lat), longitude = Number(data.longitude ?? data.lng), driverId = socket.user.uid;
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
+    if (!socket.driverReady || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return;
     try {
-      const snap = await db.ref(`users/${driverId}`).once('value'), driver = snap.val();
-      if (driver?.userType !== 'driver' || driver?.driverApprovalStatus !== 'approved' || driver?.isOnline !== true) return;
       await saveDriverLocation(driverId, latitude, longitude);
     } catch (error) { console.error('Erro na localização do motorista online:', error.message); }
   });
